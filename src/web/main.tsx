@@ -4,8 +4,9 @@ import {
   Activity,
   AlertCircle,
   AlertTriangle,
-  ArrowUpRight,
-  CheckCircle2,
+  ArrowRight,
+  Check,
+  ChevronDown,
   Clock,
   Copy,
   Cpu,
@@ -14,9 +15,11 @@ import {
   Layers,
   Lock,
   LogOut,
+  Moon,
   RefreshCcw,
   Server,
   Sparkles,
+  Sun,
   Timer,
   Upload,
   UserCheck,
@@ -34,13 +37,13 @@ import {
   YAxis,
 } from "recharts";
 import "./index.css";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -110,15 +113,11 @@ export type Status = {
   models: { id: string; displayName: string; aliases?: string[] }[];
 };
 
-const quotaConfig = {
-  remaining: { label: "Remaining", color: "var(--color-primary)" },
-} satisfies ChartConfig;
-
-const pieConfig = {
-  value: { label: "Accounts" },
-  healthy: { label: "Healthy", color: "oklch(0.696 0.17 162.48)" },
-  warning: { label: "Warning", color: "oklch(0.769 0.188 70.08)" },
-  exhausted: { label: "Exhausted", color: "oklch(0.577 0.245 27.325)" },
+const quotaChartConfig = {
+  remaining: {
+    label: "Remaining Quota",
+    color: "var(--primary)",
+  },
 } satisfies ChartConfig;
 
 function App() {
@@ -128,9 +127,29 @@ function App() {
   const [data, setData] = React.useState<Status | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [account, setAccount] = React.useState("all");
-  const [model, setModel] = React.useState("all");
-  const [copiedEndpoint, setCopiedEndpoint] = React.useState(false);
+  const [accountFilter, setAccountFilter] = React.useState("all");
+  const [modelFilter, setModelFilter] = React.useState("all");
+  const [copied, setCopied] = React.useState(false);
+
+  // Dark mode toggle
+  const [isDark, setIsDark] = React.useState(() => {
+    return (
+      localStorage.getItem("theme") === "dark" ||
+      (!("theme" in localStorage) &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches)
+    );
+  });
+
+  React.useEffect(() => {
+    const root = document.documentElement;
+    if (isDark) {
+      root.classList.add("dark");
+      localStorage.setItem("theme", "dark");
+    } else {
+      root.classList.remove("dark");
+      localStorage.setItem("theme", "light");
+    }
+  }, [isDark]);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -154,56 +173,30 @@ function App() {
     if (token) void load();
   }, [load, token]);
 
-  const accounts = React.useMemo(
-    () =>
-      (data?.accounts || []).filter(
-        (a) => account === "all" || a.id === account
-      ),
-    [data, account]
-  );
+  const accounts = React.useMemo(() => {
+    return (data?.accounts || []).filter(
+      (a) => accountFilter === "all" || a.id === accountFilter
+    );
+  }, [data, accountFilter]);
 
-  const relevantMetrics = React.useMemo(
-    () =>
-      accounts.flatMap((a) =>
-        quotaMetricsForModel(a.quota?.metrics || [], model).map((m) => ({
-          ...m,
-          account: a.email || a.id,
-        }))
-      ),
-    [accounts, model]
-  );
+  const allMetrics = React.useMemo(() => {
+    return accounts.flatMap((a) =>
+      quotaMetricsForModel(a.quota?.metrics || [], modelFilter).map((m) => ({
+        ...m,
+        account: a.email || a.id,
+      }))
+    );
+  }, [accounts, modelFilter]);
 
-  const avgRemaining = relevantMetrics.length
-    ? relevantMetrics.reduce((s, m) => s + m.remainingPercent, 0) /
-      relevantMetrics.length
+  const avgRemaining = allMetrics.length
+    ? allMetrics.reduce((s, m) => s + m.remainingPercent, 0) / allMetrics.length
     : 0;
 
-  const critical = relevantMetrics.filter((m) => m.remainingPercent <= 10).length;
+  const lowQuotaCount = allMetrics.filter((m) => m.remainingPercent <= 15).length;
 
-  const pieRows = React.useMemo(() => {
-    let healthy = 0;
-    let warning = 0;
-    let exhausted = 0;
-    for (const a of data?.accounts || []) {
-      const metrics = quotaMetricsForModel(a.quota?.metrics || [], model);
-      const min = metrics.length
-        ? Math.min(...metrics.map((m) => m.remainingPercent))
-        : 100;
-      if (min <= 10) exhausted++;
-      else if (min <= 35) warning++;
-      else healthy++;
-    }
-    return [
-      { name: "healthy", value: healthy, fill: "oklch(0.696 0.17 162.48)" },
-      { name: "warning", value: warning, fill: "oklch(0.769 0.188 70.08)" },
-      { name: "exhausted", value: exhausted, fill: "oklch(0.577 0.245 27.325)" },
-    ];
-  }, [data, model]);
-
-  // Find nearest quota reset in the entire pool
-  const nearestResetInfo = React.useMemo(() => {
-    const all = (data?.accounts || []).flatMap((a) => a.quota?.metrics || []);
-    const withReset = all
+  const nearestReset = React.useMemo(() => {
+    const list = (data?.accounts || []).flatMap((a) => a.quota?.metrics || []);
+    const pending = list
       .filter(
         (m) =>
           m.resetTime &&
@@ -214,226 +207,268 @@ function App() {
         (a, b) =>
           new Date(a.resetTime!).getTime() - new Date(b.resetTime!).getTime()
       );
-    return withReset[0] || null;
+    return pending[0] || null;
   }, [data]);
 
   const copyOverviewUrl = () => {
-    const url = `${window.location.origin}/api/accounts/overview`;
-    navigator.clipboard.writeText(url);
-    setCopiedEndpoint(true);
-    setTimeout(() => setCopiedEndpoint(false), 2000);
+    navigator.clipboard.writeText(
+      `${window.location.origin}/api/accounts/overview`
+    );
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  if (!token)
+  if (!token) {
     return (
-      <Shell>
+      <div className="flex min-h-screen items-center justify-center p-4">
         <Login
           onLogin={(v) => {
             localStorage.setItem("antigravityAdminToken", v);
             setToken(v);
           }}
         />
-      </Shell>
+      </div>
     );
+  }
 
-  if (loading && !data)
+  if (loading && !data) {
     return (
-      <Shell>
-        <SkeletonGrid />
-      </Shell>
+      <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8 space-y-6">
+        <div className="flex justify-between items-center">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-8 w-24" />
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-24 w-full" />
+          ))}
+        </div>
+        <Skeleton className="h-64 w-full" />
+      </div>
     );
+  }
 
-  if (error)
+  if (error) {
     return (
-      <Shell>
-        <Card className="border-destructive mx-auto max-w-lg">
+      <div className="flex min-h-screen items-center justify-center p-4">
+        <Card className="max-w-md w-full">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-destructive">
+            <CardTitle className="text-destructive flex items-center gap-2">
               <AlertCircle className="size-5" />
-              Failed to load dashboard
+              Failed to connect
             </CardTitle>
             <CardDescription>{error}</CardDescription>
           </CardHeader>
           <CardContent>
-            <Button onClick={load}>Retry Connection</Button>
+            <Button className="w-full" onClick={load}>
+              Retry Connection
+            </Button>
           </CardContent>
         </Card>
-      </Shell>
+      </div>
     );
+  }
 
   return (
-    <Shell>
-      <div className="flex flex-col gap-8">
-        {/* Top Header */}
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between border-b pb-6">
+    <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8 space-y-6">
+      {/* Top Navbar */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b pb-4">
+        <div className="flex items-center gap-3">
+          <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold shadow-xs">
+            A
+          </div>
           <div>
-            <div className="mb-2 flex items-center gap-2">
-              <Badge variant="secondary" className="px-2.5 py-0.5">
-                <span className="size-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse" />
-                Live Gateway
-              </Badge>
-              <Badge variant="outline" className="font-mono text-xs">
-                antigravity.vadym.live
-              </Badge>
-              <Badge variant="outline" className="text-xs">
-                Mist / Maia Preset
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-bold tracking-tight">Antigravity API</h1>
+              <Badge variant="outline" className="text-[11px] px-1.5 py-0 font-mono">
+                5111
               </Badge>
             </div>
-            <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl text-foreground">
-              Antigravity Control Center
-            </h1>
-            <p className="mt-1 text-sm text-muted-foreground max-w-2xl">
-              Intelligent quota management, sliding 5-hour & weekly limits, model
-              rotation, and automated AI status tracking.
+            <p className="text-xs text-muted-foreground">
+              Multi-account Cloud Code quota proxy & automatic failover gateway
             </p>
           </div>
-
-          <div className="flex flex-wrap items-center gap-2.5">
-            <Select value={account} onValueChange={setAccount}>
-              <SelectTrigger className="w-[180px] sm:w-[220px]">
-                <SelectValue placeholder="All accounts" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All accounts ({data?.accounts.length})</SelectItem>
-                {data?.accounts.map((a) => (
-                  <SelectItem key={a.id} value={a.id}>
-                    {a.email || a.id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={model} onValueChange={setModel}>
-              <SelectTrigger className="w-[190px] sm:w-[230px]">
-                <SelectValue placeholder="All models" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All quotas & models</SelectItem>
-                {data?.models.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.displayName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Button
-              variant="outline"
-              size="icon"
-              title="Copy /api/accounts/overview endpoint"
-              onClick={copyOverviewUrl}
-            >
-              <Copy className="size-4" />
-            </Button>
-
-            <Button variant="outline" size="icon" onClick={load} title="Refresh data">
-              <RefreshCcw className="size-4" />
-            </Button>
-
-            <AddGoogleButton token={token} onDone={load} />
-            <ImportButton token={token} onDone={load} />
-
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => {
-                localStorage.removeItem("antigravityAdminToken");
-                setToken("");
-              }}
-              title="Logout"
-            >
-              <LogOut className="size-4" />
-            </Button>
-          </div>
         </div>
 
-        {copiedEndpoint && (
-          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 text-xs text-emerald-400 flex items-center justify-between animate-in fade-in">
-            <span>
-              Copied <code>/api/accounts/overview</code> URL to clipboard! Ready for agent inspection.
-            </span>
-            <CheckCircle2 className="size-4" />
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <Select value={accountFilter} onValueChange={setAccountFilter}>
+            <SelectTrigger className="w-[170px] sm:w-[200px]">
+              <SelectValue placeholder="All accounts" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All accounts ({data?.accounts.length})</SelectItem>
+              {data?.accounts.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.email || a.id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-        {/* Global Alert / Nearest Limit Drop banner */}
-        {nearestResetInfo && (
-          <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
-                <Timer className="size-5" />
+          <Select value={modelFilter} onValueChange={setModelFilter}>
+            <SelectTrigger className="w-[170px] sm:w-[210px]">
+              <SelectValue placeholder="All models" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All models / quotas</SelectItem>
+              {data?.models.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  {m.displayName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => setIsDark(!isDark)}
+            title="Toggle theme"
+          >
+            {isDark ? <Sun className="size-4" /> : <Moon className="size-4" />}
+          </Button>
+
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={copyOverviewUrl}
+            title="Copy /api/accounts/overview URL"
+          >
+            {copied ? <Check className="size-4 text-emerald-500" /> : <Copy className="size-4" />}
+          </Button>
+
+          <Button variant="outline" size="icon" onClick={load} title="Refresh">
+            <RefreshCcw className="size-4" />
+          </Button>
+
+          <AddGoogleButton token={token} onDone={load} />
+          <ImportButton token={token} onDone={load} />
+
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              localStorage.removeItem("antigravityAdminToken");
+              setToken("");
+            }}
+            title="Sign out"
+          >
+            <LogOut className="size-4" />
+          </Button>
+        </div>
+      </div>
+
+      {copied && (
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400 flex items-center justify-between">
+          <span>Agent endpoint copied: <code>/api/accounts/overview</code></span>
+          <Check className="size-4" />
+        </div>
+      )}
+
+      {/* Next Limit Drop Highlight Banner */}
+      {nearestReset && (
+        <div className="rounded-xl border bg-muted/40 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="rounded-lg bg-background border p-2 text-foreground shrink-0">
+              <Timer className="size-4" />
+            </div>
+            <div className="min-w-0 text-xs">
+              <div className="font-semibold text-foreground truncate">
+                Next Quota Refresh in:{" "}
+                <span className="text-primary font-bold">
+                  {timeLeft(nearestReset.resetTime!)}
+                </span>
               </div>
-              <div>
-                <div className="font-semibold text-sm">
-                  Next Quota Refresh in:{" "}
-                  <span className="text-primary font-bold">
-                    {timeLeft(nearestResetInfo.resetTime!)}
-                  </span>
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  Limit <b>{canonicalModelLabel(nearestResetInfo)}</b> resets at{" "}
-                  {new Date(nearestResetInfo.resetTime!).toLocaleTimeString()} (
-                  {new Date(nearestResetInfo.resetTime!).toLocaleDateString()})
-                </div>
+              <div className="text-muted-foreground truncate">
+                {canonicalModelLabel(nearestReset)} refreshes at{" "}
+                {new Date(nearestReset.resetTime!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ({new Date(nearestReset.resetTime!).toLocaleDateString()})
               </div>
             </div>
-            <Badge variant="outline" className="font-mono text-xs">
-              {nearestResetInfo.remainingPercent.toFixed(1)}% remaining
-            </Badge>
           </div>
-        )}
-
-        {/* High-level KPIs */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard
-            icon={Server}
-            label="Total Accounts"
-            value={String(data?.stats?.accountsTotal ?? 0)}
-            sub={`${data?.stats?.accountsHealthy ?? 0} healthy & active`}
-          />
-          <MetricCard
-            icon={Activity}
-            label="Average Quota"
-            value={`${avgRemaining.toFixed(1)}%`}
-            sub={`${critical} critical (${data?.accounts.filter((a) => !a.healthy).length || 0} exhausted/err)`}
-          />
-          <MetricCard
-            icon={Zap}
-            label="Total Requests"
-            value={String(data?.stats?.requestsTotal ?? 0)}
-            sub={`${data?.stats?.successesTotal ?? 0} succeeded`}
-          />
-          <MetricCard
-            icon={Database}
-            label="Tokens Used"
-            value={(data?.stats?.tokensTotal ?? 0).toLocaleString()}
-            sub={`${data?.stats?.errorsTotal ?? 0} errors logged`}
-          />
+          <Badge variant="outline" className="font-mono text-xs self-start sm:self-auto shrink-0">
+            {nearestReset.remainingPercent.toFixed(1)}% remaining
+          </Badge>
         </div>
+      )}
 
-        {/* Charts & Distribution */}
-        <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr]">
+      {/* KPI Cards (Tight & Balanced) */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <KpiCard
+          label="Total Accounts"
+          value={String(data?.stats?.accountsTotal ?? 0)}
+          sub={`${data?.stats?.accountsHealthy ?? 0} operational`}
+          icon={Server}
+        />
+        <KpiCard
+          label="Avg Quota Pool"
+          value={`${avgRemaining.toFixed(1)}%`}
+          sub={`${lowQuotaCount} exhausted/critical`}
+          icon={Activity}
+        />
+        <KpiCard
+          label="Total Requests"
+          value={String(data?.stats?.requestsTotal ?? 0)}
+          sub={`${data?.stats?.successesTotal ?? 0} completed`}
+          icon={Zap}
+        />
+        <KpiCard
+          label="Tokens Handled"
+          value={(data?.stats?.tokensTotal ?? 0).toLocaleString()}
+          sub={`${data?.stats?.errorsTotal ?? 0} errors`}
+          icon={Database}
+        />
+      </div>
+
+      {/* Main Content Tabs */}
+      <Tabs defaultValue="accounts" className="w-full">
+        <TabsList className="grid w-full grid-cols-3 max-w-md">
+          <TabsTrigger value="accounts" className="text-xs">
+            Accounts ({accounts.length})
+          </TabsTrigger>
+          <TabsTrigger value="chart" className="text-xs">
+            Quota Chart
+          </TabsTrigger>
+          <TabsTrigger value="models" className="text-xs">
+            Models ({data?.models.length || 0})
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Tab 1: Accounts Grid */}
+        <TabsContent value="accounts" className="mt-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {accounts.map((a) => (
+              <AccountCard
+                key={a.id}
+                account={a}
+                model={modelFilter}
+                token={token}
+                onDone={load}
+              />
+            ))}
+          </div>
+        </TabsContent>
+
+        {/* Tab 2: Visual Chart */}
+        <TabsContent value="chart" className="mt-4">
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base font-semibold">
-                Account Quotas Breakdown
-              </CardTitle>
-              <CardDescription>
-                Remaining capacity for filtered model/pool.
+              <CardTitle className="text-sm font-semibold">Account Quota Capacity</CardTitle>
+              <CardDescription className="text-xs">
+                Remaining percentage for current filter: {modelFilter === "all" ? "Lowest available quota" : modelFilter}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <ChartContainer config={quotaConfig} className="h-[280px] w-full">
+              <ChartContainer config={quotaChartConfig} className="h-[260px] w-full">
                 <BarChart
-                  data={chartRows(accounts, model)}
-                  margin={{ top: 20, right: 10, left: -10, bottom: 50 }}
+                  data={chartRows(accounts, modelFilter)}
+                  margin={{ top: 20, right: 10, left: -20, bottom: 40 }}
                 >
                   <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
                   <XAxis
                     dataKey="account"
-                    angle={-25}
+                    angle={-20}
                     textAnchor="end"
-                    height={60}
+                    height={50}
                     interval={0}
                     tick={{ fontSize: 11 }}
                   />
@@ -441,167 +476,90 @@ function App() {
                   <ChartTooltip content={<ChartTooltipContent />} />
                   <Bar
                     dataKey="remaining"
-                    fill="var(--color-primary)"
-                    radius={[6, 6, 0, 0]}
+                    fill="var(--color-remaining)"
+                    radius={[4, 4, 0, 0]}
                   >
                     <LabelList
                       dataKey="remaining"
                       position="top"
                       formatter={(v: any) => `${Number(v).toFixed(0)}%`}
-                      style={{ fontSize: 11, fontWeight: 600 }}
+                      style={{ fontSize: 10, fontWeight: 600 }}
                     />
                   </Bar>
                 </BarChart>
               </ChartContainer>
             </CardContent>
           </Card>
+        </TabsContent>
 
+        {/* Tab 3: Models Registry */}
+        <TabsContent value="models" className="mt-4">
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base font-semibold">
-                Pool Health Distribution
-              </CardTitle>
-              <CardDescription>
-                Active capacity status across all connected accounts.
+              <CardTitle className="text-sm font-semibold">Upstream Model Catalogue</CardTitle>
+              <CardDescription className="text-xs">
+                Supported models confirmed against Antigravity internal endpoints
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <ChartContainer config={pieConfig} className="mx-auto h-[280px]">
-                <PieChart>
-                  <ChartTooltip content={<ChartTooltipContent nameKey="name" />} />
-                  <Pie
-                    data={pieRows}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={65}
-                    outerRadius={105}
-                    paddingAngle={4}
-                  >
-                    {pieRows.map((r) => (
-                      <Cell key={r.name} fill={r.fill} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ChartContainer>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="text-xs">Model ID</TableHead>
+                    <TableHead className="text-xs">Display Name</TableHead>
+                    <TableHead className="text-right text-xs">Requests</TableHead>
+                    <TableHead className="text-right text-xs">OK</TableHead>
+                    <TableHead className="text-right text-xs">Tokens</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {data?.models.map((m) => {
+                    const stat = (data?.stats?.models || []).find(
+                      (s: any) => s.model === m.id
+                    ) || { requests: 0, successes: 0, totalTokens: 0 };
+                    return (
+                      <TableRow key={m.id} className="text-xs">
+                        <TableCell className="font-mono font-medium">{m.id}</TableCell>
+                        <TableCell>{m.displayName}</TableCell>
+                        <TableCell className="text-right">{stat.requests}</TableCell>
+                        <TableCell className="text-right text-emerald-600 dark:text-emerald-400 font-medium">
+                          {stat.successes}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-muted-foreground">
+                          {stat.totalTokens.toLocaleString()}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
             </CardContent>
           </Card>
-        </div>
-
-        {/* Main Content Tabs */}
-        <Tabs defaultValue="accounts" className="w-full">
-          <div className="flex items-center justify-between border-b pb-3">
-            <TabsList>
-              <TabsTrigger value="accounts" className="flex items-center gap-2">
-                <UserCheck className="size-4" />
-                Accounts & Quotas ({accounts.length})
-              </TabsTrigger>
-              <TabsTrigger value="models" className="flex items-center gap-2">
-                <Cpu className="size-4" />
-                Active Models ({data?.models.length || 0})
-              </TabsTrigger>
-              <TabsTrigger value="api-agent" className="flex items-center gap-2">
-                <Sparkles className="size-4" />
-                Agent Overview API
-              </TabsTrigger>
-            </TabsList>
-          </div>
-
-          <TabsContent value="accounts" className="mt-6">
-            <div className="grid gap-6 md:grid-cols-2">
-              {accounts.map((a) => (
-                <AccountCard
-                  key={a.id}
-                  account={a}
-                  model={model}
-                  token={token}
-                  onDone={load}
-                />
-              ))}
-            </div>
-          </TabsContent>
-
-          <TabsContent value="models" className="mt-6">
-            <ModelsTable
-              rows={data?.stats?.models || []}
-              catalogue={data?.models || []}
-            />
-          </TabsContent>
-
-          <TabsContent value="api-agent" className="mt-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Sparkles className="size-5 text-primary" />
-                  Hermes / Agent Status Inspection Endpoint
-                </CardTitle>
-                <CardDescription>
-                  This dedicated endpoint is designed for automated subagents and
-                  Hermes to inspect account limits without web scraping.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="rounded-xl border bg-muted/40 p-4 font-mono text-sm space-y-2">
-                  <div className="flex items-center justify-between text-xs text-muted-foreground border-b pb-2">
-                    <span>GET /api/accounts/overview</span>
-                    <span>Auth: Bearer API_KEY or MANAGEMENT_TOKEN</span>
-                  </div>
-                  <pre className="text-xs text-foreground overflow-x-auto whitespace-pre-wrap">
-{`curl -s https://antigravity.vadym.live/api/accounts/overview \\
-  -H "Authorization: Bearer \${ANTIGRAVITY_API_KEY}"`}
-                  </pre>
-                </div>
-                <div className="text-sm text-muted-foreground space-y-2">
-                  <p><b>Returned payload structure:</b></p>
-                  <ul className="list-disc pl-5 space-y-1 text-xs">
-                    <li><code>summary.healthyAccounts</code> — number of fully operational accounts</li>
-                    <li><code>summary.nearestReset</code> — exact time, seconds left, and metric when the next throttled limit resets</li>
-                    <li><code>accounts[].gemini.fiveHourPercent</code> & <code>gemini.weeklyPercent</code> — remaining quotas for Gemini</li>
-                    <li><code>accounts[].claude.fiveHourPercent</code> & <code>claude.weeklyPercent</code> — remaining quotas for Claude 3.7 / 4.6</li>
-                    <li><code>accounts[].hasAuthError</code> — whether the account requires Google re-auth</li>
-                  </ul>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
-      </div>
-    </Shell>
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <main className="min-h-screen bg-background font-sans p-4 sm:p-6 lg:p-10 text-foreground selection:bg-primary/20">
-      <div className="mx-auto max-w-7xl">{children}</div>
-    </main>
-  );
-}
-
-function MetricCard({
-  icon: Icon,
+function KpiCard({
   label,
   value,
   sub,
+  icon: Icon,
 }: {
-  icon: any;
   label: string;
   value: string;
   sub: string;
+  icon: any;
 }) {
   return (
-    <Card className="shadow-xs">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          {label}
-        </CardTitle>
-        <div className="rounded-lg bg-muted p-1.5 text-muted-foreground">
-          <Icon className="size-4" />
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold tracking-tight">{value}</div>
-        <p className="mt-1 text-xs text-muted-foreground">{sub}</p>
-      </CardContent>
+    <Card className="p-3.5 space-y-1 shadow-xs">
+      <div className="flex items-center justify-between text-muted-foreground">
+        <span className="text-[11px] font-medium uppercase tracking-wider">{label}</span>
+        <Icon className="size-3.5" />
+      </div>
+      <div className="text-xl font-bold tracking-tight">{value}</div>
+      <div className="text-[11px] text-muted-foreground truncate">{sub}</div>
     </Card>
   );
 }
@@ -622,300 +580,183 @@ function AccountCard({
   const min = summary.all.length
     ? Math.min(...summary.all.map((m) => m.remainingPercent))
     : 100;
-
   const hasAuthError =
     account.quota?.error && /401|auth/i.test(account.quota.error);
 
   return (
-    <Card
-      className={`overflow-hidden transition-all shadow-xs ${
-        !account.healthy || hasAuthError
-          ? "border-destructive/40 bg-destructive/5"
-          : "hover:border-foreground/20"
-      }`}
-    >
-      <CardHeader className="pb-3 border-b bg-muted/20">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <CardTitle className="truncate text-base font-bold">
-                {account.email || account.id}
-              </CardTitle>
-              {account.healthy && !hasAuthError ? (
-                <Badge
-                  variant="outline"
-                  className="border-emerald-500/40 bg-emerald-500/10 text-emerald-500 text-[10px]"
-                >
-                  Healthy
-                </Badge>
-              ) : (
-                <Badge
-                  variant="outline"
-                  className="border-destructive/40 bg-destructive/10 text-destructive text-[10px]"
-                >
-                  {hasAuthError ? "Auth Expired" : "Cooldown"}
-                </Badge>
-              )}
+    <Card className="shadow-xs overflow-hidden flex flex-col justify-between">
+      <div>
+        <CardHeader className="p-3.5 border-b bg-muted/20">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-semibold text-sm truncate">
+                  {account.email || account.id}
+                </span>
+                {account.healthy && !hasAuthError ? (
+                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-emerald-500/40 text-emerald-600 dark:text-emerald-400">
+                    Healthy
+                  </Badge>
+                ) : (
+                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0">
+                    {hasAuthError ? "Auth Expired" : "Cooldown"}
+                  </Badge>
+                )}
+              </div>
+              <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                {account.quota?.projectId || account.projectId || "no-project"} · {account.quota?.tier || "unknown tier"}
+              </p>
             </div>
-            <CardDescription className="truncate text-xs mt-0.5">
-              Project:{" "}
-              <span className="font-mono">
-                {account.quota?.projectId || account.projectId || "none"}
-              </span>{" "}
-              · Tier: {account.quota?.tier || "unknown"}
-            </CardDescription>
+
+            <div className="flex items-center gap-1 shrink-0">
+              <Badge variant="outline" className="font-mono text-[11px]">
+                {min.toFixed(0)}%
+              </Badge>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2 text-destructive hover:text-destructive hover:bg-destructive/10 text-xs"
+                onClick={async () => {
+                  if (!confirm(`Delete ${account.email || account.id}?`)) return;
+                  const r = await fetch(
+                    `/api/accounts/${encodeURIComponent(account.id)}`,
+                    {
+                      method: "DELETE",
+                      headers: { authorization: `Bearer ${token}` },
+                    }
+                  );
+                  if (!r.ok) alert(await r.text());
+                  onDone();
+                }}
+              >
+                Delete
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+
+        <CardContent className="p-3.5 space-y-3">
+          {/* Dual quota windows */}
+          <div className="grid grid-cols-2 gap-2">
+            <QuotaPill title="Gemini 5h" metric={summary.gemini5h} />
+            <QuotaPill title="Gemini Week" metric={summary.geminiWeekly} />
+            <QuotaPill title="Claude 5h" metric={summary.claude5h} />
+            <QuotaPill title="Claude Week" metric={summary.claudeWeekly} />
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
-            <Badge className={badgeClass(min)}>{min.toFixed(0)}% Min</Badge>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-destructive hover:bg-destructive/10 hover:text-destructive h-8 px-2"
-              onClick={async () => {
-                if (!confirm(`Delete ${account.email || account.id}?`)) return;
-                const r = await fetch(
-                  `/api/accounts/${encodeURIComponent(account.id)}`,
-                  {
-                    method: "DELETE",
-                    headers: { authorization: `Bearer ${token}` },
-                  }
-                );
-                if (!r.ok) alert(await r.text());
-                onDone();
-              }}
-            >
-              Delete
-            </Button>
+          <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
+            <div className="rounded-md border bg-muted/20 py-1 px-1.5">
+              <div className="text-[9px] text-muted-foreground uppercase font-medium">Req</div>
+              <div className="font-semibold text-xs">{account.requestCount}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 py-1 px-1.5">
+              <div className="text-[9px] text-muted-foreground uppercase font-medium">OK</div>
+              <div className="font-semibold text-xs text-emerald-600 dark:text-emerald-400">{account.successCount}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 py-1 px-1.5">
+              <div className="text-[9px] text-muted-foreground uppercase font-medium">Err</div>
+              <div className="font-semibold text-xs text-destructive">{account.errorCount}</div>
+            </div>
           </div>
-        </div>
-      </CardHeader>
 
-      <CardContent className="space-y-4 pt-4">
-        {/* Dual Quota Windows: 5-Hour vs Weekly */}
-        <div className="grid grid-cols-2 gap-2.5">
-          <QuotaWindowBlock
-            title="Gemini 5h Window"
-            metric={summary.gemini5h}
-            fallbackLabel="Rolling 5h"
-          />
-          <QuotaWindowBlock
-            title="Gemini Weekly"
-            metric={summary.geminiWeekly}
-            fallbackLabel="Weekly Reset"
-          />
-          <QuotaWindowBlock
-            title="Claude 5h Window"
-            metric={summary.claude5h}
-            fallbackLabel="Rolling 5h"
-          />
-          <QuotaWindowBlock
-            title="Claude Weekly"
-            metric={summary.claudeWeekly}
-            fallbackLabel="Weekly Reset"
-          />
-        </div>
+          {account.quota?.error && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-2 text-[11px] text-destructive flex items-start gap-1.5">
+              <AlertTriangle className="size-3.5 shrink-0 mt-0.5" />
+              <span className="break-all">{account.quota.error}</span>
+            </div>
+          )}
 
-        {/* Mini stats */}
-        <div className="grid grid-cols-3 gap-2">
-          <MiniStat label="Requests" value={account.requestCount} />
-          <MiniStat label="Successes" value={account.successCount} />
-          <MiniStat label="Errors" value={account.errorCount} />
-        </div>
-
-        {account.quota?.error && (
-          <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-2.5 text-xs text-destructive">
-            <AlertTriangle className="size-4 shrink-0 mt-0.5" />
-            <span className="break-all">{account.quota.error}</span>
-          </div>
-        )}
-
-        <Accordion type="single" collapsible className="w-full">
-          <AccordionItem value="details" className="border rounded-xl px-3">
-            <AccordionTrigger className="text-xs font-semibold py-2.5 hover:no-underline">
-              <span>View Individual Model Quotas ({metrics.length})</span>
-            </AccordionTrigger>
-            <AccordionContent>
-              <div className="space-y-2 pt-2 pb-1">
+          <Accordion type="single" collapsible className="w-full">
+            <AccordionItem value="details" className="border-0">
+              <AccordionTrigger className="text-[11px] py-1 text-muted-foreground hover:no-underline hover:text-foreground">
+                <span>View {metrics.length} model quota entries</span>
+              </AccordionTrigger>
+              <AccordionContent className="pt-2 pb-0 space-y-1.5">
                 {metrics.map((m) => (
-                  <QuotaRow
+                  <QuotaMiniRow
                     key={`${m.source}-${m.name}-${m.resetTime}`}
                     metric={m}
                   />
                 ))}
                 {!metrics.length && (
-                  <p className="text-xs text-muted-foreground">
-                    No individual quota metrics for this filter.
+                  <p className="text-[11px] text-muted-foreground">
+                    No quota entries found for filter.
                   </p>
                 )}
-              </div>
-            </AccordionContent>
-          </AccordionItem>
-        </Accordion>
-      </CardContent>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
+        </CardContent>
+      </div>
     </Card>
   );
 }
 
-function QuotaWindowBlock({
+function QuotaPill({
   title,
   metric,
-  fallbackLabel,
 }: {
   title: string;
   metric?: QuotaMetric;
-  fallbackLabel: string;
 }) {
   const p = metric?.remainingPercent ?? null;
   const time = metric?.resetTime ? timeLeft(metric.resetTime) : null;
 
   return (
-    <div className="rounded-xl border bg-card/60 p-3 space-y-2">
-      <div className="flex items-center justify-between gap-1 text-xs">
+    <div className="rounded-lg border bg-muted/30 p-2 space-y-1">
+      <div className="flex items-center justify-between text-[11px]">
         <span className="font-medium text-muted-foreground truncate">{title}</span>
         {p == null ? (
-          <span className="text-muted-foreground text-[11px]">—</span>
+          <span className="text-muted-foreground text-[10px]">—</span>
         ) : (
-          <Badge className={badgeClass(p)} variant="outline">
-            {p.toFixed(0)}%
-          </Badge>
+          <span className="font-semibold text-[11px]">{p.toFixed(0)}%</span>
         )}
       </div>
-
       <Progress value={p ?? 0} className="h-1.5" />
-
-      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-        <span className="flex items-center gap-1">
-          <Clock className="size-3" />
-          {time ? `Resets in ${time}` : "No reset pending"}
-        </span>
+      <div className="flex items-center gap-1 text-[10px] text-muted-foreground truncate">
+        <Clock className="size-2.5 shrink-0" />
+        <span className="truncate">{time ? `Resets in ${time}` : "No reset"}</span>
       </div>
     </div>
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
+function QuotaMiniRow({ metric }: { metric: QuotaMetric }) {
   return (
-    <div className="rounded-lg border bg-muted/20 px-2.5 py-1.5 text-center">
-      <div className="text-[10px] text-muted-foreground uppercase font-medium">{label}</div>
-      <div className="text-sm font-semibold">{value.toLocaleString()}</div>
-    </div>
-  );
-}
-
-function QuotaRow({ metric }: { metric: QuotaMetric }) {
-  return (
-    <div className="rounded-lg border bg-muted/30 p-2.5 space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <div>
-          <div className="text-xs font-semibold">{canonicalModelLabel(metric)}</div>
-          <div className="text-[10px] font-mono text-muted-foreground">
-            {metric.name}
-          </div>
-        </div>
-        <Badge variant="outline" className={badgeClass(metric.remainingPercent)}>
-          {metric.remainingPercent.toFixed(1)}%
-        </Badge>
+    <div className="rounded-md border bg-muted/20 p-2 text-xs space-y-1">
+      <div className="flex items-center justify-between gap-1">
+        <span className="font-medium truncate">{canonicalModelLabel(metric)}</span>
+        <span className="font-semibold shrink-0">{metric.remainingPercent.toFixed(1)}%</span>
       </div>
-
       <Progress value={metric.remainingPercent} className="h-1" />
-
       {metric.resetTime && (
         <div className="text-[10px] text-muted-foreground flex items-center gap-1">
-          <Clock className="size-3" />
-          Resets: {timeLeft(metric.resetTime)} ({new Date(metric.resetTime).toLocaleTimeString()})
+          <Clock className="size-2.5" />
+          <span>Resets {timeLeft(metric.resetTime)}</span>
         </div>
       )}
     </div>
   );
 }
 
-function ModelsTable({
-  rows,
-  catalogue,
-}: {
-  rows: any[];
-  catalogue: { id: string; displayName: string }[];
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg font-bold">Runtime Model Registry</CardTitle>
-        <CardDescription>
-          Confirmed upstream models available via Antigravity proxy.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Model ID / Upstream</TableHead>
-              <TableHead>Display Name</TableHead>
-              <TableHead className="text-right">Requests</TableHead>
-              <TableHead className="text-right">Success</TableHead>
-              <TableHead className="text-right">Errors</TableHead>
-              <TableHead className="text-right">Total Tokens</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {catalogue.map((cat) => {
-              const stat = rows.find((r) => r.model === cat.id) || {
-                requests: 0,
-                successes: 0,
-                errors: 0,
-                totalTokens: 0,
-              };
-              return (
-                <TableRow key={cat.id}>
-                  <TableCell className="font-mono text-xs font-semibold">
-                    {cat.id}
-                  </TableCell>
-                  <TableCell className="text-sm font-medium">
-                    {cat.displayName}
-                  </TableCell>
-                  <TableCell className="text-right">{stat.requests}</TableCell>
-                  <TableCell className="text-right text-emerald-500 font-medium">
-                    {stat.successes}
-                  </TableCell>
-                  <TableCell className="text-right text-destructive font-medium">
-                    {stat.errors}
-                  </TableCell>
-                  <TableCell className="text-right font-mono text-xs">
-                    {stat.totalTokens.toLocaleString()}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
-  );
-}
-
 function Login({ onLogin }: { onLogin: (token: string) => void }) {
   const [v, setV] = React.useState("");
   return (
-    <Card className="mx-auto mt-20 max-w-md shadow-lg border-primary/20">
+    <Card className="max-w-sm w-full shadow-lg">
       <CardHeader>
-        <div className="rounded-xl bg-primary/10 w-fit p-3 text-primary mb-2">
-          <Lock className="size-6" />
-        </div>
-        <CardTitle className="text-xl">Antigravity Management</CardTitle>
-        <CardDescription>
-          Enter the admin MANAGEMENT_TOKEN to access quotas and account operations.
+        <CardTitle className="text-lg">Antigravity Management</CardTitle>
+        <CardDescription className="text-xs">
+          Enter MANAGEMENT_TOKEN to inspect accounts and quotas.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-3">
         <input
-          className="w-full rounded-xl border bg-background px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+          className="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
           type="password"
           value={v}
           onChange={(e) => setV(e.target.value)}
           placeholder="Enter management token"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && v.trim()) onLogin(v.trim());
-          }}
+          onKeyDown={(e) => e.key === "Enter" && v.trim() && onLogin(v.trim())}
         />
         <Button className="w-full" onClick={() => v.trim() && onLogin(v.trim())}>
           Sign In
@@ -978,43 +819,39 @@ function AddGoogleButton({
 
   return (
     <>
-      <Button onClick={start} disabled={busy} variant="default">
-        <Upload className="mr-1.5 size-4" />
+      <Button onClick={start} disabled={busy} size="sm">
+        <Upload className="mr-1.5 size-3.5" />
         {busy ? "Starting..." : "Add Account"}
       </Button>
 
       {flow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <Card className="w-full max-w-xl border-primary shadow-2xl">
-            <CardHeader>
-              <CardTitle>Authorize Google Account</CardTitle>
-              <CardDescription>
-                Open Google authorization. After login, copy the redirected URL from
-                your address bar and paste it below.
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <Card className="w-full max-w-lg shadow-xl">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Authorize Google Account</CardTitle>
+              <CardDescription className="text-xs">
+                Open Google OAuth in a new tab, copy the redirected URL from your browser address bar and paste below.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="space-y-3">
               <Button
-                className="w-full flex items-center justify-center gap-2"
+                variant="outline"
+                className="w-full text-xs"
                 onClick={() => window.open(flow.url, "_blank")}
               >
-                <span>Open Google Sign-In</span>
-                <ExternalLink className="size-4" />
+                Open Google Sign-In <ExternalLink className="ml-1 size-3.5" />
               </Button>
-              <div className="rounded-xl border bg-muted/40 p-3 text-xs font-mono break-all max-h-24 overflow-y-auto">
-                {flow.url}
-              </div>
               <input
-                className="w-full rounded-xl border bg-background px-3 py-2 text-sm"
+                className="w-full rounded-md border bg-background px-3 py-1.5 text-xs font-mono"
                 value={callbackUrl}
                 onChange={(e) => setCallbackUrl(e.target.value)}
                 placeholder="Paste redirect URL: http://localhost:61135/oauth-callback?code=..."
               />
               <div className="flex gap-2">
-                <Button disabled={!callbackUrl || busy} onClick={complete}>
-                  Complete Import
+                <Button size="sm" disabled={!callbackUrl || busy} onClick={complete}>
+                  Complete
                 </Button>
-                <Button variant="outline" onClick={() => setFlow(null)}>
+                <Button size="sm" variant="outline" onClick={() => setFlow(null)}>
                   Cancel
                 </Button>
               </div>
@@ -1070,31 +907,14 @@ function ImportButton({
       />
       <Button
         variant="outline"
+        size="sm"
         disabled={busy}
         onClick={() => ref.current?.click()}
       >
-        <Upload className="mr-1.5 size-4" />
-        {busy ? "Importing..." : "JSON Import"}
+        <Upload className="mr-1.5 size-3.5" />
+        {busy ? "Importing..." : "JSON"}
       </Button>
     </>
-  );
-}
-
-function SkeletonGrid() {
-  return (
-    <div className="space-y-6">
-      <Skeleton className="h-20 w-full rounded-2xl" />
-      <div className="grid gap-4 md:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-28 rounded-2xl" />
-        ))}
-      </div>
-      <div className="grid gap-6 md:grid-cols-2">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-64 rounded-2xl" />
-        ))}
-      </div>
-    </div>
   );
 }
 
@@ -1107,24 +927,12 @@ function quotaSummary(metrics: QuotaMetric[]) {
       )
     );
 
-  const gemini5h =
-    byName("gemini-5h") ||
-    byText("gemini", "5h") ||
-    byText("gemini", "five");
-  const geminiWeekly =
-    byName("gemini-weekly") || byText("gemini", "weekly");
-
+  const gemini5h = byName("gemini-5h") || byText("gemini", "5h");
+  const geminiWeekly = byName("gemini-weekly") || byText("gemini", "weekly");
   const claude5h =
-    byName("3p-5h") ||
-    byName("claude:5h") ||
-    byText("3p", "5h") ||
-    byText("3p", "five") ||
-    byText("claude", "5h");
+    byName("3p-5h") || byName("claude:5h") || byText("3p", "5h");
   const claudeWeekly =
-    byName("3p-weekly") ||
-    byName("claude:weekly") ||
-    byText("3p", "weekly") ||
-    byText("claude", "weekly");
+    byName("3p-weekly") || byName("claude:weekly") || byText("3p", "weekly");
 
   return { all: metrics, gemini5h, geminiWeekly, claude5h, claudeWeekly };
 }
@@ -1142,19 +950,10 @@ function canonicalModelLabel(metric: QuotaMetric) {
     "gemini-3.1-flash-lite": "Gemini 3.1 Flash Lite",
     "gemini-3.5-flash-lite": "Gemini 3.5 Flash Lite",
     "gemini-3.1-flash-image": "Gemini 3.1 Flash Image",
-    "gemini-3.1-pro-high": "Gemini 3.1 Pro High",
-    "gemini-3.1-pro-low": "Gemini 3.1 Pro Low",
-    "gemini-3.6-flash-low": "Gemini 3.6 Flash Low",
-    "gemini-3.6-flash-medium": "Gemini 3.6 Flash Medium",
-    "gemini-3.6-flash-high": "Gemini 3.6 Flash High",
-    "gemini-3.7-flash-low": "Gemini 3.7 Flash Low",
-    "gemini-3.7-flash-medium": "Gemini 3.7 Flash Medium",
-    "gemini-3.7-flash-high": "Gemini 3.7 Flash High",
     "gemini-3.8-flash-low": "Gemini 3.8 Flash Low",
     "gemini-3.8-flash-medium": "Gemini 3.8 Flash Medium",
     "gemini-3.8-flash-high": "Gemini 3.8 Flash High",
-    "gemini-3.5-flash-low": "Gemini 3.5 Flash Medium",
-    "gemini-3.5-flash-extra-low": "Gemini 3.5 Flash Low",
+    "gemini-3.8-flash-tiered": "Gemini 3.8 Flash Tiered",
     "claude-sonnet-4-6": "Claude Sonnet 4.6 Thinking",
     "claude-opus-4-6-thinking": "Claude Opus 4.6 Thinking",
     "gpt-oss-120b-medium": "GPT-OSS 120B Medium",
@@ -1186,16 +985,8 @@ function chartRows(accounts: Account[], model: string) {
     const remaining = ms.length
       ? Math.min(...ms.map((m) => m.remainingPercent))
       : 0;
-    return { account: a.email || a.id, remaining };
+    return { account: a.email ? a.email.split("@")[0] : a.id, remaining };
   });
-}
-
-function badgeClass(p: number) {
-  return p <= 10
-    ? "border-destructive/40 bg-destructive/15 text-destructive font-semibold"
-    : p <= 35
-    ? "border-amber-500/40 bg-amber-500/15 text-amber-500 font-semibold"
-    : "border-emerald-500/40 bg-emerald-500/15 text-emerald-500 font-semibold";
 }
 
 function timeLeft(iso: string) {
