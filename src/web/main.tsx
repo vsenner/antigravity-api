@@ -170,7 +170,7 @@ function App() {
 
   const accounts = data?.accounts || [];
 
-  // Pool Calculations
+  // Pool Calculations with Tier weighting (Pro = 5x weight, Free = 1x weight)
   const poolStats = React.useMemo(() => {
     if (!accounts.length) {
       return {
@@ -179,23 +179,35 @@ function App() {
         nearestReset: null as any,
         target95Time: null as string | null,
         pendingResets: [] as any[],
+        proCount: 0,
+        freeCount: 0,
       };
     }
 
-    let gTotal = 0;
-    let cTotal = 0;
+    let gWeightedSum = 0;
+    let cWeightedSum = 0;
+    let totalWeight = 0;
+    let proCount = 0;
+    let freeCount = 0;
     const allPending: any[] = [];
 
     for (const a of accounts) {
+      const isPro = (a.quota?.tier === "g1-pro-tier" || (a as any).tier === "g1-pro-tier");
+      const weight = isPro ? 5 : 1;
+      totalWeight += weight;
+      if (isPro) proCount++; else freeCount++;
+
       const metrics = a.quota?.metrics || [];
       const getM = (id: string) => metrics.find((m) => m.name === id);
+      // Prefer exact weekly bucket from summary
       const gWeek = getM("gemini-weekly") || metrics.find((m) => m.name.includes("gemini") && m.source === "summary");
       const cWeek = getM("3p-weekly") || metrics.find((m) => m.name.includes("3p") && m.source === "summary");
 
-      const gVal = gWeek ? gWeek.remainingPercent : 100;
-      const cVal = cWeek ? cWeek.remainingPercent : 100;
-      gTotal += gVal;
-      cTotal += cVal;
+      const gVal = gWeek != null ? gWeek.remainingPercent : 100;
+      const cVal = cWeek != null ? cWeek.remainingPercent : 100;
+
+      gWeightedSum += (gVal * weight);
+      cWeightedSum += (cVal * weight);
 
       for (const m of metrics) {
         if (m.resetTime && m.remainingPercent < 98) {
@@ -207,6 +219,8 @@ function App() {
               displayName: m.displayName || m.name,
               remaining: m.remainingPercent,
               resetTime: m.resetTime,
+              isPro,
+              weight,
               ms,
             });
           }
@@ -215,16 +229,14 @@ function App() {
     }
 
     allPending.sort((a, b) => a.ms - b.ms);
-    const geminiAvg = gTotal / accounts.length;
-    const claudeAvg = cTotal / accounts.length;
+    const geminiAvg = totalWeight > 0 ? (gWeightedSum / totalWeight) : 100;
+    const claudeAvg = totalWeight > 0 ? (cWeightedSum / totalWeight) : 100;
 
-    // Nearest reset
     const nearest = allPending[0] || null;
 
-    // When will we reach >= 95% capacity?
     let target95Time: string | null = null;
     if (geminiAvg >= 95) {
-      target95Time = "95%+ Ready";
+      target95Time = "Already at 95%+";
     } else {
       const weeklyResets = allPending.filter((p) => p.metric.includes("weekly"));
       if (weeklyResets.length > 0) {
@@ -240,6 +252,8 @@ function App() {
       nearestReset: nearest,
       target95Time,
       pendingResets: allPending,
+      proCount,
+      freeCount,
     };
   }, [accounts]);
 
@@ -315,18 +329,18 @@ function App() {
             {poolStats.geminiAvg.toFixed(1)}%
           </div>
           <div className="text-[10px] text-muted-foreground">
-            Target 95% in: <b className="text-foreground">{poolStats.target95Time}</b>
+            {poolStats.proCount} Pro (5x) + {poolStats.freeCount} Free
           </div>
         </div>
 
         <div className="rounded-lg border bg-card p-2.5 space-y-0.5">
-          <div className="text-[10px] text-muted-foreground uppercase font-semibold">Next Limit Refill</div>
+          <div className="text-[10px] text-muted-foreground uppercase font-semibold">Target 95% Refill ETA</div>
           <div className="text-xl font-black tracking-tight text-primary">
-            {poolStats.nearestReset ? timeLeft(poolStats.nearestReset.resetTime) : "None"}
+            {poolStats.target95Time}
           </div>
           <div className="text-[10px] text-muted-foreground truncate">
             {poolStats.nearestReset
-              ? `${poolStats.nearestReset.account} (${poolStats.nearestReset.remaining.toFixed(0)}%)`
+              ? `Next reset: ${poolStats.nearestReset.account} in ${timeLeft(poolStats.nearestReset.resetTime)}`
               : "Pool fully replenished"}
           </div>
         </div>
@@ -336,7 +350,7 @@ function App() {
           <div className="text-xl font-black tracking-tight text-foreground">
             {poolStats.claudeAvg.toFixed(1)}%
           </div>
-          <div className="text-[10px] text-muted-foreground">100% available pool</div>
+          <div className="text-[10px] text-muted-foreground">Weighted pool capacity</div>
         </div>
 
         <div className="rounded-lg border bg-card p-2.5 space-y-0.5">
@@ -351,40 +365,44 @@ function App() {
       </div>
 
       {/* CHARTS & RECOVERY TIMELINE (Front and Center) */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-2.5">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-2.5 items-stretch">
         {/* Chart: Per Account Capacity */}
-        <div className="lg:col-span-2 rounded-lg border bg-card p-3 space-y-1.5">
-          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted-foreground">
+        <div className="lg:col-span-2 rounded-lg border bg-card p-3 flex flex-col justify-between">
+          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1">
             <span>Account Gemini Capacity (%)</span>
-            <span className="font-mono text-[10px]">Pool Avg: {poolStats.geminiAvg.toFixed(1)}%</span>
+            <span className="font-mono text-[10px]">Weighted Pool Avg: {poolStats.geminiAvg.toFixed(1)}%</span>
           </div>
 
-          <ChartContainer config={quotaChartConfig} className="h-[140px] w-full">
-            <BarChart
-              data={accounts.map((a) => {
-                const metrics = a.quota?.metrics || [];
-                const m = metrics.find((x) => x.name === "gemini-weekly") || metrics.find((x) => x.name.includes("gemini"));
-                return {
-                  name: a.email ? a.email.split("@")[0] : a.id,
-                  remaining: m ? m.remainingPercent : 100,
-                };
-              })}
-              margin={{ top: 10, right: 10, left: -25, bottom: 20 }}
-            >
-              <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.2} />
-              <XAxis dataKey="name" tick={{ fontSize: 10 }} interval={0} />
-              <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
-              <ChartTooltip content={<ChartTooltipContent />} />
-              <Bar dataKey="remaining" fill="var(--color-primary)" radius={[3, 3, 0, 0]}>
-                <LabelList
-                  dataKey="remaining"
-                  position="top"
-                  formatter={(v: any) => `${Number(v).toFixed(0)}%`}
-                  style={{ fontSize: 9, fontWeight: 700 }}
-                />
-              </Bar>
-            </BarChart>
-          </ChartContainer>
+          <div className="flex-1 w-full min-h-[170px] flex items-center">
+            <ChartContainer config={quotaChartConfig} className="h-[170px] w-full">
+              <BarChart
+                data={accounts.map((a) => {
+                  const metrics = a.quota?.metrics || [];
+                  const m = metrics.find((x) => x.name === "gemini-weekly") || metrics.find((x) => x.name.includes("gemini"));
+                  const isPro = (a.quota?.tier === "g1-pro-tier" || (a as any).tier === "g1-pro-tier");
+                  return {
+                    name: a.email ? a.email.split("@")[0] : a.id,
+                    remaining: m ? m.remainingPercent : 100,
+                    tier: isPro ? "Pro (5x)" : "Free (1x)",
+                  };
+                })}
+                margin={{ top: 14, right: 10, left: -25, bottom: 20 }}
+              >
+                <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.2} />
+                <XAxis dataKey="name" tick={{ fontSize: 10 }} interval={0} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
+                <ChartTooltip content={<ChartTooltipContent />} />
+                <Bar dataKey="remaining" fill="var(--color-primary)" radius={[3, 3, 0, 0]}>
+                  <LabelList
+                    dataKey="remaining"
+                    position="top"
+                    formatter={(v: any) => `${Number(v).toFixed(0)}%`}
+                    style={{ fontSize: 9, fontWeight: 700 }}
+                  />
+                </Bar>
+              </BarChart>
+            </ChartContainer>
+          </div>
         </div>
 
         {/* Next Refills Timeline */}
@@ -394,10 +412,18 @@ function App() {
               Next Upcoming Refills (Schedule)
             </div>
             <div className="space-y-1">
-              {poolStats.pendingResets.slice(0, 4).map((r, i) => (
-                <div key={i} className="flex items-center justify-between text-xs py-1 border-b not-last:border-b">
+              {poolStats.pendingResets
+                .filter((r, idx, arr) => arr.findIndex(x => x.account === r.account && x.metric === r.metric) === idx)
+                .slice(0, 5)
+                .map((r, i) => (
+                <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b not-last:border-b">
                   <div className="min-w-0 pr-2">
-                    <div className="font-semibold truncate text-[11px]">{r.account}</div>
+                    <div className="font-semibold truncate text-[11px] flex items-center gap-1.5">
+                      <span>{r.account}</span>
+                      <Badge variant="outline" className="text-[9px] py-0 px-1 font-mono">
+                        {r.isPro ? "Pro" : "Free"}
+                      </Badge>
+                    </div>
                     <div className="text-[10px] text-muted-foreground truncate">{r.displayName}</div>
                   </div>
                   <div className="text-right shrink-0">
