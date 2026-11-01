@@ -11,7 +11,7 @@ import { requireBearer } from "./auth.js";
 import { AntigravityClient } from "./proxy/antigravity-client.js";
 import { refreshAntigravityToken } from "./proxy/token-refresh.js";
 import { AntigravityQuotaClient, type AccountQuotaStatus } from "./proxy/quota-client.js";
-import { MODELS } from "./proxy/models.js";
+import { DEFAULT_MODEL, MODELS } from "./proxy/models.js";
 import { GoogleOAuthService } from "./oauth/google.js";
 import { GoogleDeviceOAuthService } from "./oauth/device.js";
 import { GoogleManualOAuthService } from "./oauth/manual.js";
@@ -39,8 +39,16 @@ export function createApp(options: AppOptions) {
 
   const managementAuth = requireBearer([options.managementToken]);
   const apiAuth = requireBearer(options.apiKeys);
+  const anyAuth = requireBearer([...options.apiKeys, options.managementToken]);
 
   app.get("/healthz", (_req, res) => res.json({ ok: true }));
+  app.get("/api/accounts/overview", anyAuth, async (_req, res, next) => {
+    try {
+      const status = await accountsStatus(store, quotaClient);
+      const overview = formatOverview(status);
+      res.json(overview);
+    } catch (e) { next(e); }
+  });
   app.get("/api/public/status", managementAuth, async (_req, res, next) => { try { res.json(await accountsStatus(store, quotaClient)); } catch (e) { next(e); } });
   app.get("/api/accounts", managementAuth, async (_req, res, next) => { try { res.json({ accounts: await store.listPublicAccounts() }); } catch (e) { next(e); } });
   app.get("/api/accounts/status", managementAuth, async (_req, res, next) => { try { res.json(await accountsStatus(store, quotaClient)); } catch (e) { next(e); } });
@@ -68,7 +76,7 @@ export function createApp(options: AppOptions) {
   app.get("/v1/models", apiAuth, async (_req, res, next) => { try { res.json(await client.listModels()); } catch (e) { next(e); } });
 
   app.post("/v1/chat/completions", apiAuth, async (req, res, next) => {
-    const model = String(req.body?.model || "gemini-pro-agent");
+    const model = String(req.body?.model || DEFAULT_MODEL);
     const stream = Boolean(req.body?.stream);
     const tried = new Set<string>();
     let last: any;
@@ -110,6 +118,9 @@ export function createApp(options: AppOptions) {
           return res.status(upstream.status).send(upstream.body);
         }
         last = upstream.body;
+        // A rejected model says nothing about the account, so answer the caller
+        // instead of replaying the same rejection against every account left.
+        if ((upstream as any).reason === "model") return res.status(upstream.status).json(upstream.body);
         store.recordFailure(account, model, last);
         if (upstream.retryable) rotation.recordFailure(account, model, last, { cooldownOverrideMs: upstream.cooldownMs });
         else if ((upstream as any).reason === "auth") rotation.recordFailure(account, model, last, { authFailed: true });
@@ -191,6 +202,81 @@ async function accountsStatus(store: AccountStore, quotaClient: AntigravityQuota
   }));
   const stats = await summaryFromAccounts(enriched);
   return { accounts: enriched, stats, models: MODELS.map(m => ({ id: m.id, displayName: m.displayName, aliases: m.aliases })) };
+}
+
+function formatOverview(status: { accounts: any[]; stats: any; models: any[] }) {
+  const accounts = status.accounts || [];
+  const now = Date.now();
+
+  const accountOverviews = accounts.map(a => {
+    const metrics: any[] = a.quota?.metrics || [];
+    const getMetric = (pattern: RegExp) => metrics.find(m => pattern.test(m.name || ""));
+    const gemini5h = getMetric(/gemini-5h/i) || getMetric(/gemini.*5h/i);
+    const geminiWeekly = getMetric(/gemini-weekly/i) || getMetric(/gemini.*week/i);
+    const claude5h = getMetric(/(3p-5h|claude.*5h)/i);
+    const claudeWeekly = getMetric(/(3p-weekly|claude.*week)/i);
+
+    // If weekly is not explicitly provided as a separate bucket in models list, extract from models quotaInfo
+    const flashModelMetric = metrics.find(m => /gemini-(3\.8-flash|3\.5-flash|3-flash)/i.test(m.name));
+    const effectiveGeminiWeekly = geminiWeekly || (flashModelMetric ? { remainingPercent: flashModelMetric.remainingPercent, resetTime: flashModelMetric.resetTime } : null);
+
+    // Calculate nearest reset time across all metrics that are below 95%
+    const expiringMetrics = metrics.filter(m => typeof m.remainingPercent === "number" && m.remainingPercent < 95 && m.resetTime);
+    let nextReset: { metric: string; resetTime: string; secondsLeft: number } | null = null;
+    if (expiringMetrics.length > 0) {
+      expiringMetrics.sort((x, y) => new Date(x.resetTime).getTime() - new Date(y.resetTime).getTime());
+      const first = expiringMetrics[0];
+      const diffSec = Math.max(0, Math.round((new Date(first.resetTime).getTime() - now) / 1000));
+      nextReset = { metric: first.name, resetTime: first.resetTime, secondsLeft: diffSec };
+    }
+
+    return {
+      id: a.id,
+      email: a.email,
+      healthy: a.healthy,
+      enabled: a.enabled,
+      hasAuthError: Boolean(a.quota?.error && /401|auth/i.test(a.quota.error)),
+      quotaError: a.quota?.error,
+      tier: a.quota?.tier || "unknown",
+      gemini: {
+        fiveHourPercent: gemini5h ? gemini5h.remainingPercent : null,
+        fiveHourReset: gemini5h?.resetTime || null,
+        weeklyPercent: effectiveGeminiWeekly ? effectiveGeminiWeekly.remainingPercent : null,
+        weeklyReset: effectiveGeminiWeekly?.resetTime || null,
+      },
+      claude: {
+        fiveHourPercent: claude5h ? claude5h.remainingPercent : null,
+        fiveHourReset: claude5h?.resetTime || null,
+        weeklyPercent: claudeWeekly ? claudeWeekly.remainingPercent : null,
+        weeklyReset: claudeWeekly?.resetTime || null,
+      },
+      nextReset,
+      requestCount: a.requestCount,
+      totalTokens: a.totalTokens,
+    };
+  });
+
+  const healthyAccounts = accountOverviews.filter(a => a.healthy && !a.hasAuthError);
+  const geminiAvailable = healthyAccounts.filter(a => (a.gemini.weeklyPercent ?? 100) > 2);
+  const claudeAvailable = healthyAccounts.filter(a => (a.claude.weeklyPercent ?? 100) > 2);
+
+  // Pool next reset
+  const allResets = accountOverviews
+    .map(a => a.nextReset)
+    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .sort((a, b) => a.secondsLeft - b.secondsLeft);
+
+  return {
+    timestamp: new Date(now).toISOString(),
+    summary: {
+      totalAccounts: accounts.length,
+      healthyAccounts: healthyAccounts.length,
+      geminiReadyAccounts: geminiAvailable.length,
+      claudeReadyAccounts: claudeAvailable.length,
+      nearestReset: allResets[0] || null,
+    },
+    accounts: accountOverviews,
+  };
 }
 
 async function summaryFromAccounts(accounts: any[]) {
