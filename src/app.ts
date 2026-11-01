@@ -211,17 +211,16 @@ function formatOverview(status: { accounts: any[]; stats: any; models: any[] }) 
   const accountOverviews = accounts.map(a => {
     const metrics: any[] = a.quota?.metrics || [];
     const getMetric = (pattern: RegExp) => metrics.find(m => pattern.test(m.name || ""));
-    const gemini5h = getMetric(/gemini-5h/i) || getMetric(/gemini.*5h/i);
-    const geminiWeekly = getMetric(/gemini-weekly/i) || getMetric(/gemini.*week/i);
-    const claude5h = getMetric(/(3p-5h|claude.*5h)/i);
-    const claudeWeekly = getMetric(/(3p-weekly|claude.*week)/i);
+    const gemini5h = getMetric(/^gemini-5h$/i) || getMetric(/gemini.*5h/i);
+    const geminiWeekly = getMetric(/^gemini-weekly$/i) || getMetric(/gemini.*week/i);
+    const claude5h = getMetric(/^3p-5h$/i) || getMetric(/(3p-5h|claude.*5h)/i);
+    const claudeWeekly = getMetric(/^3p-weekly$/i) || getMetric(/(3p-weekly|claude.*week)/i);
 
-    // If weekly is not explicitly provided as a separate bucket in models list, extract from models quotaInfo
     const flashModelMetric = metrics.find(m => /gemini-(3\.8-flash|3\.5-flash|3-flash)/i.test(m.name));
     const effectiveGeminiWeekly = geminiWeekly || (flashModelMetric ? { remainingPercent: flashModelMetric.remainingPercent, resetTime: flashModelMetric.resetTime } : null);
 
-    // Calculate nearest reset time across all metrics that are below 95%
-    const expiringMetrics = metrics.filter(m => typeof m.remainingPercent === "number" && m.remainingPercent < 95 && m.resetTime);
+    // Calculate nearest reset time across all metrics that are below 98%
+    const expiringMetrics = metrics.filter(m => typeof m.remainingPercent === "number" && m.remainingPercent < 98 && m.resetTime);
     let nextReset: { metric: string; resetTime: string; secondsLeft: number } | null = null;
     if (expiringMetrics.length > 0) {
       expiringMetrics.sort((x, y) => new Date(x.resetTime).getTime() - new Date(y.resetTime).getTime());
@@ -260,7 +259,12 @@ function formatOverview(status: { accounts: any[]; stats: any; models: any[] }) 
   const geminiAvailable = healthyAccounts.filter(a => (a.gemini.weeklyPercent ?? 100) > 2);
   const claudeAvailable = healthyAccounts.filter(a => (a.claude.weeklyPercent ?? 100) > 2);
 
-  // Pool next reset
+  // Calculate total pool percentages
+  const totalAccounts = Math.max(1, accounts.length);
+  const geminiPoolWeekly = accountOverviews.reduce((acc, a) => acc + (a.gemini.weeklyPercent ?? 100), 0) / totalAccounts;
+  const claudePoolWeekly = accountOverviews.reduce((acc, a) => acc + (a.claude.weeklyPercent ?? 100), 0) / totalAccounts;
+
+  // Pool upcoming resets
   const allResets = accountOverviews
     .map(a => a.nextReset)
     .filter((r): r is NonNullable<typeof r> => r !== null)
@@ -273,7 +277,10 @@ function formatOverview(status: { accounts: any[]; stats: any; models: any[] }) 
       healthyAccounts: healthyAccounts.length,
       geminiReadyAccounts: geminiAvailable.length,
       claudeReadyAccounts: claudeAvailable.length,
+      geminiPoolWeeklyPercent: Math.round(geminiPoolWeekly * 10) / 10,
+      claudePoolWeeklyPercent: Math.round(claudePoolWeekly * 10) / 10,
       nearestReset: allResets[0] || null,
+      upcomingResets: allResets.slice(0, 5),
     },
     accounts: accountOverviews,
   };

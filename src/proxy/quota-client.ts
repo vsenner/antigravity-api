@@ -58,20 +58,33 @@ export class AntigravityQuotaClient {
         postJson(`${BASE}/v1internal:retrieveUserQuotaSummary`, token, payload, CLOUD_UA),
       ]);
       const metrics: QuotaMetric[] = [];
-      if (models.ok) {
-        for (const [name, info] of Object.entries<any>(models.json?.models || {})) {
-          const qi = info?.quotaInfo;
-          if (!qi) continue;
-          if (!/gemini|claude/i.test(name)) continue;
-          metrics.push({ name, displayName: info.displayName, remainingPercent: pct(qi.remainingFraction), resetTime: qi.resetTime, source: "models" });
-        }
-      }
       if (summary.ok) {
         for (const group of summary.json?.groups || []) {
           for (const bucket of group?.buckets || []) {
             if (typeof bucket?.remainingFraction !== "number") continue;
-            metrics.push({ name: String(bucket.bucketId || group.groupId || bucket.displayName || "quota"), displayName: bucket.displayName || group.displayName, remainingPercent: pct(bucket.remainingFraction), resetTime: bucket.resetTime, source: "summary" });
+            metrics.push({
+              name: String(bucket.bucketId || group.groupId || bucket.displayName || "quota"),
+              displayName: bucket.displayName || group.displayName,
+              remainingPercent: pct(bucket.remainingFraction),
+              resetTime: bucket.resetTime,
+              source: "summary"
+            });
           }
+        }
+      }
+      if (models.ok) {
+        for (const [name, info] of Object.entries<any>(models.json?.models || {})) {
+          const qi = info?.quotaInfo;
+          if (!qi) continue;
+          if (!/gemini|claude|gpt/i.test(name)) continue;
+          // Only add model-level metric if not already provided by summary
+          metrics.push({
+            name,
+            displayName: info.displayName,
+            remainingPercent: pct(qi.remainingFraction),
+            resetTime: qi.resetTime,
+            source: "models"
+          });
         }
       }
       const error = !models.ok ? `fetchAvailableModels ${models.status}: ${models.message}` : !summary.ok ? `retrieveUserQuotaSummary ${summary.status}: ${summary.message}` : undefined;
@@ -83,7 +96,16 @@ export class AntigravityQuotaClient {
 }
 
 function pct(f: unknown): number { return Math.max(0, Math.min(100, Math.round(Number(f || 0) * 1000) / 10)); }
-function dedupe(rows: QuotaMetric[]) { const seen = new Set<string>(); return rows.filter(r => { const k = `${r.source}|${r.name}|${r.resetTime || ""}`; if (seen.has(k)) return false; seen.add(k); return true; }); }
+function dedupe(rows: QuotaMetric[]) {
+  const seen = new Set<string>();
+  return rows.filter(r => {
+    // Prefer summary metrics over models metrics when names collide or map to buckets
+    const k = `${r.name}|${r.resetTime || ""}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
 async function postJson(url: string, token: string, payload: unknown, ua: string): Promise<{ ok: boolean; status: number; json: any; message?: string }> {
   const res = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": ua, accept: "*/*" }, body: JSON.stringify(payload) });
   const text = await res.text();
