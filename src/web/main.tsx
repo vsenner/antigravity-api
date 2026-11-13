@@ -31,8 +31,6 @@ import {
   CartesianGrid,
   Cell,
   LabelList,
-  Pie,
-  PieChart,
   XAxis,
   YAxis,
 } from "recharts";
@@ -54,29 +52,7 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { Progress } from "@/components/ui/progress";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion";
 
 export type QuotaMetric = {
   name: string;
@@ -114,148 +90,61 @@ export type Status = {
 
 const quotaChartConfig = {
   remaining: {
-    label: "Quota %",
+    label: "Available Quota %",
     color: "var(--primary)",
   },
 } satisfies ChartConfig;
 
-function App() {
-  const [token, setToken] = React.useState(
-    () => localStorage.getItem("antigravityAdminToken") || ""
-  );
+export function App() {
+  const [token, setToken] = React.useState<string>(() => localStorage.getItem("antigravityAdminToken") || "");
   const [data, setData] = React.useState<Status | null>(null);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
+  const [overview, setOverview] = React.useState<any | null>(null);
+  const [loading, setLoading] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
   const [isDark, setIsDark] = React.useState(() => {
-    return (
-      localStorage.getItem("theme") === "dark" ||
-      (!("theme" in localStorage) &&
-        window.matchMedia("(prefers-color-scheme: dark)").matches)
-    );
+    if (typeof window !== "undefined") {
+      return document.documentElement.classList.contains("dark") || window.matchMedia("(prefers-color-scheme: dark)").matches;
+    }
+    return true;
   });
 
   React.useEffect(() => {
-    const root = document.documentElement;
     if (isDark) {
-      root.classList.add("dark");
-      localStorage.setItem("theme", "dark");
+      document.documentElement.classList.add("dark");
     } else {
-      root.classList.remove("dark");
-      localStorage.setItem("theme", "light");
+      document.documentElement.classList.remove("dark");
     }
   }, [isDark]);
 
   const load = React.useCallback(async () => {
+    if (!token) return;
     setLoading(true);
-    setError(null);
     try {
-      if (!token) throw new Error("ADMIN token required");
-      const res = await fetch("/api/public/status", {
-        cache: "no-store",
-        headers: { authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-      setData(await res.json());
+      const [resStatus, resOverview] = await Promise.all([
+        fetch("/api/accounts/status", { credentials: "same-origin", headers: { authorization: `Bearer ${token}` } }),
+        fetch("/api/accounts/overview", { credentials: "same-origin", headers: { authorization: `Bearer ${token}` } }),
+      ]);
+
+      if (resStatus.status === 401 || resOverview.status === 401) {
+        setToken("");
+        localStorage.removeItem("antigravityAdminToken");
+        return;
+      }
+      if (resStatus.ok) setData(await resStatus.json());
+      if (resOverview.ok) setOverview(await resOverview.json());
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      console.error("Failed to load status:", e);
     } finally {
       setLoading(false);
     }
   }, [token]);
 
   React.useEffect(() => {
-    if (token) void load();
-  }, [load, token]);
+    if (token) load();
+  }, [token, load]);
 
   const accounts = data?.accounts || [];
-
-  // Pool Calculations with Tier weighting (Pro = 5x weight, Free = 1x weight)
-  const poolStats = React.useMemo(() => {
-    if (!accounts.length) {
-      return {
-        geminiAvg: 100,
-        claudeAvg: 100,
-        nearestReset: null as any,
-        target95Time: null as string | null,
-        pendingResets: [] as any[],
-        proCount: 0,
-        freeCount: 0,
-      };
-    }
-
-    let gWeightedSum = 0;
-    let cWeightedSum = 0;
-    let totalWeight = 0;
-    let proCount = 0;
-    let freeCount = 0;
-    const allPending: any[] = [];
-
-    for (const a of accounts) {
-      const isPro = (a.quota?.tier === "g1-pro-tier" || (a as any).tier === "g1-pro-tier");
-      const weight = isPro ? 5 : 1;
-      totalWeight += weight;
-      if (isPro) proCount++; else freeCount++;
-
-      const metrics = a.quota?.metrics || [];
-      const getM = (id: string) => metrics.find((m) => m.name === id);
-      // Prefer exact weekly bucket from summary
-      const gWeek = getM("gemini-weekly") || metrics.find((m) => m.name.includes("gemini") && m.source === "summary");
-      const cWeek = getM("3p-weekly") || metrics.find((m) => m.name.includes("3p") && m.source === "summary");
-
-      const gVal = gWeek != null ? gWeek.remainingPercent : 100;
-      const cVal = cWeek != null ? cWeek.remainingPercent : 100;
-
-      gWeightedSum += (gVal * weight);
-      cWeightedSum += (cVal * weight);
-
-      for (const m of metrics) {
-        if (m.resetTime && m.remainingPercent < 98) {
-          const ms = new Date(m.resetTime).getTime();
-          if (ms > Date.now()) {
-            allPending.push({
-              account: a.email ? a.email.split("@")[0] : a.id,
-              metric: m.name,
-              displayName: m.displayName || m.name,
-              remaining: m.remainingPercent,
-              resetTime: m.resetTime,
-              isPro,
-              weight,
-              ms,
-            });
-          }
-        }
-      }
-    }
-
-    allPending.sort((a, b) => a.ms - b.ms);
-    const geminiAvg = totalWeight > 0 ? (gWeightedSum / totalWeight) : 100;
-    const claudeAvg = totalWeight > 0 ? (cWeightedSum / totalWeight) : 100;
-
-    const nearest = allPending[0] || null;
-
-    let target95Time: string | null = null;
-    if (geminiAvg >= 95) {
-      target95Time = "Already at 95%+";
-    } else {
-      const weeklyResets = allPending.filter((p) => p.metric.includes("weekly"));
-      if (weeklyResets.length > 0) {
-        target95Time = timeLeft(weeklyResets[0].resetTime);
-      } else if (nearest) {
-        target95Time = timeLeft(nearest.resetTime);
-      }
-    }
-
-    return {
-      geminiAvg,
-      claudeAvg,
-      nearestReset: nearest,
-      target95Time,
-      pendingResets: allPending,
-      proCount,
-      freeCount,
-    };
-  }, [accounts]);
+  const summary = overview?.summary;
 
   const copyOverviewUrl = () => {
     navigator.clipboard.writeText(`${window.location.origin}/api/accounts/overview`);
@@ -265,7 +154,7 @@ function App() {
 
   if (!token) {
     return (
-      <div className="flex min-h-screen items-center justify-center p-4">
+      <div className="flex min-h-screen items-center justify-center p-4 bg-background text-foreground">
         <Login onLogin={(v) => { localStorage.setItem("antigravityAdminToken", v); setToken(v); }} />
       </div>
     );
@@ -273,38 +162,60 @@ function App() {
 
   if (loading && !data) {
     return (
-      <div className="mx-auto max-w-7xl p-4 space-y-4">
-        <Skeleton className="h-10 w-full" />
+      <div className="mx-auto max-w-7xl p-3 space-y-3 font-sans">
+        <Skeleton className="h-8 w-full" />
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
           {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-16" />
+            <Skeleton key={i} className="h-20" />
           ))}
         </div>
       </div>
     );
   }
 
+  // Bar chart dataset: true current usable quota per account
+  const chartData = accounts.map((a) => {
+    const isPro = a.quota?.tier === "g1-pro-tier" || (a as any).tier === "g1-pro-tier";
+    const metrics = a.quota?.metrics || [];
+    const g5h = metrics.find((x) => x.name === "gemini-5h");
+    const gWeek = metrics.find((x) => x.name === "gemini-weekly");
+    
+    // Pro uses active 5h window; Free has only weekly limit
+    const val = isPro
+      ? (g5h ? g5h.remainingPercent : (gWeek ? gWeek.remainingPercent : 100))
+      : (gWeek ? gWeek.remainingPercent : 0);
+
+    return {
+      name: a.email ? a.email.split("@")[0] : a.id,
+      remaining: Math.round(val * 10) / 10,
+      tier: isPro ? "Pro (5h cycle)" : "Free (Weekly)",
+      isPro,
+    };
+  });
+
+  const nextRefills = summary?.upcomingRefills || [];
+  const targetEta = summary?.target95Eta || "N/A";
+  const nearestRefill = summary?.nearestRefill;
+
   return (
-    <div className="mx-auto max-w-7xl px-3 py-3 sm:px-6 sm:py-4 space-y-3 font-sans">
-      {/* Dense Top Header */}
+    <div className="mx-auto max-w-7xl px-3 py-2.5 sm:px-6 sm:py-3.5 space-y-2.5 font-sans bg-background text-foreground min-h-screen">
+      {/* Top Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
         <div className="flex items-center gap-2">
-          <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground font-black text-xs">
+          <div className="flex size-7 items-center justify-center rounded bg-primary text-primary-foreground font-black text-xs">
             AG
           </div>
-          <div>
-            <div className="flex items-center gap-1.5">
-              <span className="font-extrabold text-sm tracking-tight">Antigravity Hub</span>
-              <Badge variant="outline" className="text-[10px] py-0 px-1 font-mono">
-                {accounts.length} accts
-              </Badge>
-            </div>
+          <div className="flex items-center gap-1.5">
+            <span className="font-bold text-sm tracking-tight">Antigravity Quota Manager</span>
+            <Badge variant="outline" className="text-[10px] py-0 px-1 font-mono">
+              {accounts.length} accts ({summary?.proCount ?? 4} Pro / {summary?.freeCount ?? 3} Free)
+            </Badge>
           </div>
         </div>
 
         <div className="flex items-center gap-1.5">
-          <Button variant="outline" size="sm" className="h-7 text-xs px-2" onClick={load}>
-            <RefreshCcw className="size-3 mr-1" /> Refresh
+          <Button variant="outline" size="sm" className="h-7 text-xs px-2" onClick={load} disabled={loading}>
+            <RefreshCcw className={`size-3 mr-1 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
           <Button variant="outline" size="sm" className="h-7 text-xs px-2" onClick={copyOverviewUrl}>
             {copied ? <Check className="size-3 text-emerald-500 mr-1" /> : <Copy className="size-3 mr-1" />}
@@ -312,83 +223,75 @@ function App() {
           </Button>
           <AddGoogleButton token={token} onDone={load} />
           <ImportButton token={token} onDone={load} />
-          <Button variant="ghost" size="icon" className="size-7" onClick={() => setIsDark(!isDark)}>
+          <Button variant="ghost" size="icon" className="size-7" onClick={() => setIsDark(!isDark)} title="Toggle Dark/Light">
             {isDark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
           </Button>
-          <Button variant="ghost" size="icon" className="size-7" onClick={() => { localStorage.removeItem("antigravityAdminToken"); setToken(""); }}>
+          <Button variant="ghost" size="icon" className="size-7" onClick={() => { localStorage.removeItem("antigravityAdminToken"); setToken(""); }} title="Sign Out">
             <LogOut className="size-3.5" />
           </Button>
         </div>
       </div>
 
-      {/* TOP KPI NUMBERS: Pool Capacity, Target 95%, Next Refill */}
+      {/* TOP KPI NUMBERS: Realistic Pool Capacity, Refill ETA, Imminent Reset */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <div className="rounded-lg border bg-card p-2.5 space-y-0.5">
+        <div className="rounded border bg-card p-2.5 space-y-0.5">
           <div className="text-[10px] text-muted-foreground uppercase font-semibold">Gemini Pool Capacity</div>
           <div className="text-xl font-black tracking-tight text-foreground">
-            {poolStats.geminiAvg.toFixed(1)}%
+            {summary?.geminiPoolCapacityPercent != null ? `${summary.geminiPoolCapacityPercent}%` : "—"}
           </div>
           <div className="text-[10px] text-muted-foreground">
-            {poolStats.proCount} Pro (5x) + {poolStats.freeCount} Free
+            Pro avg: {summary?.geminiProAvgPercent ?? 0}% · Free: {summary?.geminiFreeAvgPercent ?? 0}%
           </div>
         </div>
 
-        <div className="rounded-lg border bg-card p-2.5 space-y-0.5">
+        <div className="rounded border bg-card p-2.5 space-y-0.5">
           <div className="text-[10px] text-muted-foreground uppercase font-semibold">Target 95% Refill ETA</div>
           <div className="text-xl font-black tracking-tight text-primary">
-            {poolStats.target95Time}
+            {targetEta}
           </div>
           <div className="text-[10px] text-muted-foreground truncate">
-            {poolStats.nearestReset
-              ? `Next reset: ${poolStats.nearestReset.account} in ${timeLeft(poolStats.nearestReset.resetTime)}`
-              : "Pool fully replenished"}
+            {targetEta === "Already at 95%+" ? "Capacity target fulfilled" : "Continuous 5h window restoration"}
           </div>
         </div>
 
-        <div className="rounded-lg border bg-card p-2.5 space-y-0.5">
+        <div className="rounded border bg-card p-2.5 space-y-0.5">
+          <div className="text-[10px] text-muted-foreground uppercase font-semibold">Next Quota Refill</div>
+          <div className="text-xl font-black tracking-tight text-foreground">
+            {nearestRefill ? `${formatTimeLeftSec(nearestRefill.secondsLeft)}` : "None pending"}
+          </div>
+          <div className="text-[10px] text-muted-foreground truncate">
+            {nearestRefill
+              ? `${nearestRefill.email.split("@")[0]} (+${nearestRefill.boostToPool}% pool)`
+              : "All accounts topped"}
+          </div>
+        </div>
+
+        <div className="rounded border bg-card p-2.5 space-y-0.5">
           <div className="text-[10px] text-muted-foreground uppercase font-semibold">Claude / 3P Capacity</div>
           <div className="text-xl font-black tracking-tight text-foreground">
-            {poolStats.claudeAvg.toFixed(1)}%
-          </div>
-          <div className="text-[10px] text-muted-foreground">Weighted pool capacity</div>
-        </div>
-
-        <div className="rounded-lg border bg-card p-2.5 space-y-0.5">
-          <div className="text-[10px] text-muted-foreground uppercase font-semibold">Tokens Processed</div>
-          <div className="text-xl font-black tracking-tight text-foreground">
-            {(data?.stats?.tokensTotal ?? 0).toLocaleString()}
+            {summary?.claudePoolCapacityPercent != null ? `${summary.claudePoolCapacityPercent}%` : "100%"}
           </div>
           <div className="text-[10px] text-muted-foreground">
-            {data?.stats?.requestsTotal ?? 0} reqs ({data?.stats?.errorsTotal ?? 0} err)
+            {data?.stats?.tokensTotal ? `${data.stats.tokensTotal.toLocaleString()} tokens` : "Full capacity available"}
           </div>
         </div>
       </div>
 
-      {/* CHARTS & RECOVERY TIMELINE (Front and Center) */}
+      {/* CHARTS & RECOVERY SCHEDULE (Equal Height, Stretched) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-2.5 items-stretch">
-        {/* Chart: Per Account Capacity */}
-        <div className="lg:col-span-2 rounded-lg border bg-card p-3 flex flex-col justify-between">
+        {/* Chart: Per Account Usable Capacity */}
+        <div className="lg:col-span-2 rounded border bg-card p-3 flex flex-col justify-between">
           <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1">
-            <span>Account Gemini Capacity (%)</span>
-            <span className="font-mono text-[10px]">Weighted Pool Avg: {poolStats.geminiAvg.toFixed(1)}%</span>
+            <span>Usable Quota Per Account</span>
+            <span className="font-mono text-[10px] font-normal lowercase">
+              Pro (5h window) vs Free (weekly cap)
+            </span>
           </div>
 
-          <div className="flex-1 w-full min-h-[170px] flex items-center">
-            <ChartContainer config={quotaChartConfig} className="h-[170px] w-full">
-              <BarChart
-                data={accounts.map((a) => {
-                  const metrics = a.quota?.metrics || [];
-                  const m = metrics.find((x) => x.name === "gemini-weekly") || metrics.find((x) => x.name.includes("gemini"));
-                  const isPro = (a.quota?.tier === "g1-pro-tier" || (a as any).tier === "g1-pro-tier");
-                  return {
-                    name: a.email ? a.email.split("@")[0] : a.id,
-                    remaining: m ? m.remainingPercent : 100,
-                    tier: isPro ? "Pro (5x)" : "Free (1x)",
-                  };
-                })}
-                margin={{ top: 14, right: 10, left: -25, bottom: 20 }}
-              >
-                <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.2} />
+          <div className="flex-1 w-full min-h-[180px] flex items-center pt-2">
+            <ChartContainer config={quotaChartConfig} className="h-[180px] w-full">
+              <BarChart data={chartData} margin={{ top: 16, right: 10, left: -25, bottom: 5 }}>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.15} />
                 <XAxis dataKey="name" tick={{ fontSize: 10 }} interval={0} />
                 <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
                 <ChartTooltip content={<ChartTooltipContent />} />
@@ -397,7 +300,7 @@ function App() {
                     dataKey="remaining"
                     position="top"
                     formatter={(v: any) => `${Number(v).toFixed(0)}%`}
-                    style={{ fontSize: 9, fontWeight: 700 }}
+                    style={{ fontSize: 10, fontWeight: 700 }}
                   />
                 </Bar>
               </BarChart>
@@ -405,102 +308,118 @@ function App() {
           </div>
         </div>
 
-        {/* Next Refills Timeline */}
-        <div className="rounded-lg border bg-card p-3 flex flex-col justify-between">
+        {/* Refill Schedule */}
+        <div className="rounded border bg-card p-3 flex flex-col justify-between">
           <div>
-            <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1.5">
-              Next Upcoming Refills (Schedule)
+            <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1">
+              <span>Next Upcoming Refills</span>
+              <span className="font-mono text-[10px] font-normal lowercase">deduplicated</span>
             </div>
-            <div className="space-y-1">
-              {poolStats.pendingResets
-                .filter((r, idx, arr) => arr.findIndex(x => x.account === r.account && x.metric === r.metric) === idx)
-                .slice(0, 5)
-                .map((r, i) => (
-                <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b not-last:border-b">
+
+            <div className="divide-y text-xs">
+              {nextRefills.slice(0, 5).map((r: any) => (
+                <div key={`${r.accountId}-${r.metric}`} className="flex items-center justify-between py-1.5">
                   <div className="min-w-0 pr-2">
                     <div className="font-semibold truncate text-[11px] flex items-center gap-1.5">
-                      <span>{r.account}</span>
+                      <span>{r.email.split("@")[0]}</span>
                       <Badge variant="outline" className="text-[9px] py-0 px-1 font-mono">
                         {r.isPro ? "Pro" : "Free"}
                       </Badge>
                     </div>
-                    <div className="text-[10px] text-muted-foreground truncate">{r.displayName}</div>
+                    <div className="text-[10px] text-muted-foreground truncate">
+                      {r.window}
+                    </div>
                   </div>
                   <div className="text-right shrink-0">
-                    <div className="font-mono font-bold text-primary text-[11px]">{timeLeft(r.resetTime)}</div>
-                    <div className="text-[10px] text-muted-foreground">+{ (100 - r.remaining).toFixed(0) }% boost</div>
+                    <div className="font-mono font-bold text-primary text-[11px]">{formatTimeLeftSec(r.secondsLeft)}</div>
+                    <div className="text-[10px] text-muted-foreground">+{r.boostToPool}% pool</div>
                   </div>
                 </div>
               ))}
-              {!poolStats.pendingResets.length && (
-                <div className="text-xs text-muted-foreground py-4 text-center">
-                  No active throttles in pool.
+              {!nextRefills.length && (
+                <div className="text-xs text-muted-foreground py-6 text-center">
+                  All account limits fully topped.
                 </div>
               )}
             </div>
           </div>
-          <div className="text-[10px] text-muted-foreground pt-1.5 border-t mt-1">
-            Pool auto-balances load across remaining healthy accounts.
+          <div className="text-[9px] text-muted-foreground pt-1.5 border-t mt-1">
+            Pro 5h windows recycle continuously (33.6x/wk) · Free caps reset weekly.
           </div>
         </div>
       </div>
 
-      {/* DENSE ACCOUNTS TABLE / CARDS */}
-      <div className="rounded-lg border bg-card p-3 space-y-2.5">
-        <div className="flex items-center justify-between border-b pb-2">
+      {/* DENSE CONNECTED ACCOUNTS OVERVIEW */}
+      <div className="rounded border bg-card p-3 space-y-2">
+        <div className="flex items-center justify-between border-b pb-1.5">
           <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-            Connected Accounts Detail
+            Connected Accounts Quota Windows
           </span>
-          <span className="text-[11px] text-muted-foreground">
-            Compact Quota Windows (5-Hour & Weekly)
+          <span className="text-[10px] text-muted-foreground">
+            Clear numbers & countdowns (no bloated progress bars)
           </span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
           {accounts.map((a) => {
+            const isPro = a.quota?.tier === "g1-pro-tier" || (a as any).tier === "g1-pro-tier";
             const metrics = a.quota?.metrics || [];
             const getM = (id: string) => metrics.find((m) => m.name === id);
             const g5h = getM("gemini-5h");
-            const gWeek = getM("gemini-weekly") || metrics.find((m) => m.name.includes("gemini"));
+            const gWeek = getM("gemini-weekly");
             const c5h = getM("3p-5h");
-            const cWeek = getM("3p-weekly") || metrics.find((m) => m.name.includes("3p"));
+            const cWeek = getM("3p-weekly");
 
             return (
-              <div key={a.id} className="rounded-md border bg-muted/15 p-2 text-xs space-y-1.5">
+              <div key={a.id} className="rounded border bg-muted/15 p-2 text-xs space-y-1.5">
                 <div className="flex items-center justify-between gap-1">
                   <div className="min-w-0">
                     <div className="font-bold truncate text-xs">{a.email || a.id}</div>
                     <div className="text-[10px] text-muted-foreground font-mono truncate">
-                      {a.quota?.projectId || a.projectId || "no-proj"} · {a.quota?.tier || "tier"}
+                      {a.quota?.projectId || a.projectId || "no-project"} · {isPro ? "Google AI Pro" : "Free Tier"}
                     </div>
                   </div>
-                  <Badge variant={a.healthy ? "outline" : "destructive"} className="text-[9px] py-0 px-1 shrink-0">
-                    {a.healthy ? "OK" : "Limit"}
+                  <Badge variant={a.healthy ? "outline" : "destructive"} className="text-[9px] py-0 px-1 shrink-0 font-mono">
+                    {a.healthy ? "HEALTHY" : "LIMITED"}
                   </Badge>
                 </div>
 
-                {/* Fast Quota Numbers */}
+                {/* 4 Windows Grid */}
                 <div className="grid grid-cols-2 gap-1 text-[11px]">
-                  <div className="rounded bg-background border px-1.5 py-1">
-                    <div className="text-muted-foreground text-[9px] uppercase font-semibold">Gemini Week</div>
-                    <div className="font-bold text-xs">
-                      {gWeek ? `${gWeek.remainingPercent.toFixed(0)}%` : "—"}
-                    </div>
-                    <div className="text-[9px] text-muted-foreground truncate">
-                      {gWeek?.resetTime ? `in ${timeLeft(gWeek.resetTime)}` : "No reset"}
-                    </div>
-                  </div>
-
+                  {/* Gemini 5h */}
                   <div className="rounded bg-background border px-1.5 py-1">
                     <div className="text-muted-foreground text-[9px] uppercase font-semibold">Gemini 5h</div>
                     <div className="font-bold text-xs">
-                      {g5h ? `${g5h.remainingPercent.toFixed(0)}%` : "100%"}
+                      {isPro ? (g5h ? `${g5h.remainingPercent.toFixed(0)}%` : "100%") : "N/A (Free)"}
                     </div>
                     <div className="text-[9px] text-muted-foreground truncate">
-                      {g5h?.resetTime ? `in ${timeLeft(g5h.resetTime)}` : "Full"}
+                      {isPro ? (g5h?.resetTime ? `in ${timeLeft(g5h.resetTime)}` : "Full") : "Weekly only"}
                     </div>
                   </div>
 
+                  {/* Gemini Weekly */}
+                  <div className="rounded bg-background border px-1.5 py-1">
+                    <div className="text-muted-foreground text-[9px] uppercase font-semibold">Gemini Week</div>
+                    <div className="font-bold text-xs">
+                      {gWeek ? `${gWeek.remainingPercent.toFixed(0)}%` : (isPro ? "100%" : "0%")}
+                    </div>
+                    <div className="text-[9px] text-muted-foreground truncate">
+                      {gWeek?.resetTime ? `in ${timeLeft(gWeek.resetTime)}` : (isPro ? "Bounded by 5h" : "Exhausted")}
+                    </div>
+                  </div>
+
+                  {/* Claude 5h */}
+                  <div className="rounded bg-background border px-1.5 py-1">
+                    <div className="text-muted-foreground text-[9px] uppercase font-semibold">Claude 5h</div>
+                    <div className="font-bold text-xs">
+                      {isPro ? (c5h ? `${c5h.remainingPercent.toFixed(0)}%` : "100%") : "N/A (Free)"}
+                    </div>
+                    <div className="text-[9px] text-muted-foreground truncate">
+                      {isPro ? (c5h?.resetTime ? `in ${timeLeft(c5h.resetTime)}` : "Full") : "Weekly only"}
+                    </div>
+                  </div>
+
+                  {/* Claude Weekly */}
                   <div className="rounded bg-background border px-1.5 py-1">
                     <div className="text-muted-foreground text-[9px] uppercase font-semibold">Claude Week</div>
                     <div className="font-bold text-xs">
@@ -510,21 +429,11 @@ function App() {
                       {cWeek?.resetTime ? `in ${timeLeft(cWeek.resetTime)}` : "Full"}
                     </div>
                   </div>
-
-                  <div className="rounded bg-background border px-1.5 py-1">
-                    <div className="text-muted-foreground text-[9px] uppercase font-semibold">Claude 5h</div>
-                    <div className="font-bold text-xs">
-                      {c5h ? `${c5h.remainingPercent.toFixed(0)}%` : "100%"}
-                    </div>
-                    <div className="text-[9px] text-muted-foreground truncate">
-                      {c5h?.resetTime ? `in ${timeLeft(c5h.resetTime)}` : "Full"}
-                    </div>
-                  </div>
                 </div>
 
-                {/* Bottom Bar: Reqs & Delete */}
+                {/* Account Footnote & Removal */}
                 <div className="flex items-center justify-between text-[10px] text-muted-foreground border-t pt-1">
-                  <span>Reqs: {a.requestCount} (Err: {a.errorCount})</span>
+                  <span>Tokens: {a.totalTokens.toLocaleString()} (Req: {a.requestCount})</span>
                   <button
                     className="text-destructive hover:underline"
                     onClick={async () => {
@@ -536,7 +445,7 @@ function App() {
                       load();
                     }}
                   >
-                    Remove
+                    Delete
                   </button>
                 </div>
               </div>
@@ -681,6 +590,15 @@ function ImportButton({ token, onDone }: { token: string; onDone: () => void }) 
       </Button>
     </>
   );
+}
+
+function formatTimeLeftSec(sec: number) {
+  if (sec <= 0) return "ready";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return d ? `${d}d ${rh}h` : `${h}h ${m}m`;
 }
 
 function timeLeft(iso: string) {

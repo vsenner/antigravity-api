@@ -21,6 +21,14 @@ function dataUrlPart(url: string): AntigravityPart | undefined {
   return { inlineData: { mimeType: match[1], data: match[2] }, thoughtSignature: THOUGHT_SIGNATURE };
 }
 
+function videoDataUrlPart(url: string): AntigravityPart | undefined {
+  const part = dataUrlPart(url);
+  if (!part?.inlineData) return part;
+  const mime = (part.inlineData.mimeType || "").toLowerCase();
+  if (!mime.startsWith("video/")) part.inlineData.mimeType = "video/mp4";
+  return part;
+}
+
 function contentParts(content: unknown): AntigravityPart[] {
   if (typeof content === "string") return [{ text: content }];
   if (Array.isArray(content)) {
@@ -30,6 +38,7 @@ function contentParts(content: unknown): AntigravityPart[] {
       const obj = item as Record<string, any>;
       if (obj.type === "text" && typeof obj.text === "string") parts.push({ text: obj.text });
       if (obj.type === "image_url" && typeof obj.image_url?.url === "string") { const p = dataUrlPart(obj.image_url.url); if (p) parts.push(p); }
+      if (obj.type === "video_url" && typeof obj.video_url?.url === "string") { const p = videoDataUrlPart(obj.video_url.url); if (p) parts.push(p); }
       if (obj.type === "file" && typeof obj.file?.file_data === "string") parts.push({ inlineData: { mimeType: mimeFromFilename(obj.file.filename), data: obj.file.file_data } });
       if (obj.type === "input_audio" && typeof obj.input_audio?.data === "string") parts.push({ inlineData: { mime_type: audioMime[obj.input_audio.format] || `audio/${obj.input_audio.format || "wav"}`, data: obj.input_audio.data } });
       if ((obj.type === "video" || obj.type === "input_video") && typeof obj.video?.data === "string") parts.push({ inlineData: { mimeType: obj.video.mime_type || obj.video.mimeType || "video/mp4", data: obj.video.data } });
@@ -54,6 +63,25 @@ function stableSessionId(payload: any): string {
 
 function sanitizeName(name: string) { return (name || "tool").replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 63); }
 function jsonOrString(raw: string) { try { return JSON.parse(raw); } catch { return raw; } }
+
+function looksLikeJsonSchema(node: any): boolean {
+  if (node && typeof node === "object") {
+    if (Array.isArray(node)) {
+      return node.some(looksLikeJsonSchema);
+    }
+    return Object.entries(node).some(([k, v]) =>
+      (k === "$ref" && typeof v === "string" && v.startsWith("#/")) || looksLikeJsonSchema(v)
+    );
+  }
+  return false;
+}
+
+function sanitizeToolResult(val: any): any {
+  if (looksLikeJsonSchema(val)) {
+    return { output: typeof val === "string" ? val : JSON.stringify(val) };
+  }
+  return val;
+}
 
 export function usesClaudeStyle(modelId: string): boolean {
   const id = modelId.toLowerCase();
@@ -83,7 +111,7 @@ export function openAIToAntigravity(input: any, projectId: string) {
       if (Array.isArray(message.tool_calls)) for (const tc of message.tool_calls) if (tc.type === "function") parts.push({ functionCall: { id: tc.id, name: sanitizeName(tc.function?.name), args: jsonOrString(tc.function?.arguments || "{}") }, thoughtSignature: THOUGHT_SIGNATURE });
       if (parts.length) request.contents.push({ role: "model", parts });
       const responses: AntigravityPart[] = [];
-      if (Array.isArray(message.tool_calls)) for (const tc of message.tool_calls) if (toolResponses.has(tc.id)) responses.push({ functionResponse: { id: tc.id, name: toolCallNames.get(tc.id) || sanitizeName(tc.function?.name), response: { result: toolResponses.get(tc.id) } } });
+      if (Array.isArray(message.tool_calls)) for (const tc of message.tool_calls) if (toolResponses.has(tc.id)) responses.push({ functionResponse: { id: tc.id, name: toolCallNames.get(tc.id) || sanitizeName(tc.function?.name), response: { result: sanitizeToolResult(toolResponses.get(tc.id)) } } });
       if (responses.length) request.contents.push({ role: "user", parts: responses });
     } else if (role === "tool") {
       continue;

@@ -14,7 +14,7 @@ describe("Antigravity format adapter", () => {
 
     expect(payload).toMatchObject({
       project: "project-123",
-      model: "gemini-pro-agent",
+      model: "gemini-3.8-flash-high",
       request: {
         systemInstruction: { role: "user", parts: [{ text: "You are concise" }] },
         contents: [{ role: "user", parts: [{ text: "Hello" }] }],
@@ -40,6 +40,22 @@ describe("Antigravity format adapter", () => {
     expect(parts.some((p: any) => p.inlineData?.mime_type === "audio/mpeg")).toBe(true);
     expect(parts.some((p: any) => p.inlineData?.mimeType === "video/mp4")).toBe(true);
     expect(payload.request.tools[0].functionDeclarations[0].parametersJsonSchema).toBeTruthy();
+  });
+
+  it("supports video_url data URLs and normalizes non-video mime types", () => {
+    const payload = openAIToAntigravity({
+      model: "gemini-3.8-flash-high",
+      messages: [{ role: "user", content: [
+        { type: "text", text: "what happens" },
+        { type: "video_url", video_url: { url: "data:video/mp4;base64,dmlkZW8=" } },
+        { type: "video_url", video_url: { url: "data:video/quicktime;base64,bW92" } },
+        { type: "video_url", video_url: { url: "data:application/octet-stream;base64,YmluCg==" } },
+        { type: "video_url", video_url: { url: "https://example.com/not-inline.mp4" } },
+      ]}],
+    }, "project-123");
+    const inline = payload.request.contents[0].parts.filter((p: any) => p.inlineData);
+    expect(inline.map((p: any) => p.inlineData.mimeType)).toEqual(["video/mp4", "video/quicktime", "video/mp4"]);
+    expect(inline[0].inlineData.data).toBe("dmlkZW8=");
   });
 
   it("uses responseModalities for claude-style models", () => {

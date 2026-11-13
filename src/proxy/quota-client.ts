@@ -3,8 +3,8 @@ import { getAccessToken, getProjectId } from "./antigravity-format.js";
 import { refreshAntigravityToken } from "./token-refresh.js";
 
 const BASE = process.env.ANTIGRAVITY_QUOTA_BASE_URL || "https://daily-cloudcode-pa.googleapis.com";
-const UA = process.env.ANTIGRAVITY_LOAD_USER_AGENT || "antigravity/1.20.5 linux/amd64 google-api-nodejs-client/10.3.0";
-const CLOUD_UA = process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.20.5 linux/amd64";
+const UA = process.env.ANTIGRAVITY_LOAD_USER_AGENT || "antigravity/2.30.0 darwin/arm64 google-api-nodejs-client/10.3.0";
+const CLOUD_UA = process.env.ANTIGRAVITY_USER_AGENT || "antigravity/2.30.0 darwin/arm64";
 
 export interface QuotaMetric { name: string; displayName?: string; remainingPercent: number; resetTime?: string; source: "models" | "summary" }
 export interface AccountQuotaStatus { fetchedAt: number; tier?: string; projectId?: string; metrics: QuotaMetric[]; error?: string }
@@ -53,11 +53,14 @@ export class AntigravityQuotaClient {
       if (!projectId) return { fetchedAt: Date.now(), metrics: [], tier, error: "no project_id" };
 
       const payload = { project: projectId };
-      const [models, summary] = await Promise.all([
-        postJson(`${BASE}/v1internal:fetchAvailableModels`, token, payload, CLOUD_UA),
-        postJson(`${BASE}/v1internal:retrieveUserQuotaSummary`, token, payload, CLOUD_UA),
-      ]);
+      // 1. Fetch retrieveUserQuotaSummary (Claude/GPT 3p-5h and 3p-weekly buckets)
+      const summaryPromise = postJson(`${BASE}/v1internal:retrieveUserQuotaSummary`, token, payload, CLOUD_UA);
+      // 2. Fetch fetchAvailableModels (Gemini model quotaInfo: 5h rolling window for Pro, weekly window for Free)
+      const modelsPromise = postJson(`${BASE}/v1internal:fetchAvailableModels`, token, payload, UA);
+
+      const [summary, modelsRes] = await Promise.all([summaryPromise, modelsPromise]);
       const metrics: QuotaMetric[] = [];
+
       if (summary.ok) {
         for (const group of summary.json?.groups || []) {
           for (const bucket of group?.buckets || []) {
@@ -72,22 +75,43 @@ export class AntigravityQuotaClient {
           }
         }
       }
-      if (models.ok) {
-        for (const [name, info] of Object.entries<any>(models.json?.models || {})) {
-          const qi = info?.quotaInfo;
-          if (!qi) continue;
-          if (!/gemini|claude|gpt/i.test(name)) continue;
-          // Only add model-level metric if not already provided by summary
-          metrics.push({
-            name,
-            displayName: info.displayName,
-            remainingPercent: pct(qi.remainingFraction),
-            resetTime: qi.resetTime,
-            source: "models"
-          });
+
+      if (modelsRes.ok) {
+        const models = modelsRes.json?.models || {};
+        // Representative Gemini model is gemini-3.8-flash-tiered
+        const geminiTiered = models["gemini-3.8-flash-tiered"]?.quotaInfo
+          || models["gemini-3.1-flash-image"]?.quotaInfo
+          || models["gemini-2.5-flash"]?.quotaInfo;
+
+        if (geminiTiered) {
+          // If the account has a resetTime, remainingFraction indicates available quota.
+          // Note: when remainingFraction is undefined/omitted by upstream, it indicates 0% available (exhausted).
+          const frac = typeof geminiTiered.remainingFraction === "number" ? geminiTiered.remainingFraction : 0;
+          const isPro = tier === "g1-pro-tier";
+          
+          if (isPro) {
+            // On Pro, Gemini models track the 5-hour rolling replenishment window
+            metrics.push({
+              name: "gemini-5h",
+              displayName: "Gemini 5-Hour Limit",
+              remainingPercent: pct(frac),
+              resetTime: geminiTiered.resetTime,
+              source: "models"
+            });
+          } else {
+            // On Free-tier, Gemini models track the Weekly reset cap (no 5h replenishment)
+            metrics.push({
+              name: "gemini-weekly",
+              displayName: "Gemini Weekly Limit",
+              remainingPercent: pct(frac),
+              resetTime: geminiTiered.resetTime,
+              source: "models"
+            });
+          }
         }
       }
-      const error = !models.ok ? `fetchAvailableModels ${models.status}: ${models.message}` : !summary.ok ? `retrieveUserQuotaSummary ${summary.status}: ${summary.message}` : undefined;
+
+      const error = !summary.ok ? `retrieveUserQuotaSummary ${summary.status}: ${summary.message}` : (!modelsRes.ok ? `fetchAvailableModels ${modelsRes.status}: ${modelsRes.message}` : undefined);
       return { fetchedAt: Date.now(), projectId, tier, metrics: dedupe(metrics), error };
     } catch (e) {
       return { fetchedAt: Date.now(), projectId, tier, metrics: [], error: e instanceof Error ? e.message : String(e) };

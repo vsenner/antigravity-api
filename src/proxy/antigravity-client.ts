@@ -31,7 +31,7 @@ const BASE_URLS = (process.env.ANTIGRAVITY_BASE_URLS || "https://daily-cloudcode
 // Upstream gates model families on the client version reported here: a stale
 // version makes current models answer 404 "Requested entity was not found".
 // Keep it in step with a released Antigravity build, then re-probe the catalogue.
-const SHORT_UA = process.env.ANTIGRAVITY_USER_AGENT || "antigravity/2.12.2 darwin/arm64";
+const SHORT_UA = process.env.ANTIGRAVITY_USER_AGENT || "antigravity/2.30.0 darwin/arm64";
 const LONG_UA = process.env.ANTIGRAVITY_LOAD_USER_AGENT || `${SHORT_UA} google-api-nodejs-client/10.3.0`;
 
 export class AntigravityClient {
