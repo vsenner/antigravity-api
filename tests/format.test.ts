@@ -71,6 +71,20 @@ describe("request adapter", () => {
     ]);
   });
 
+  it("strips blocked identity phrases and URLs from system instructions", () => {
+    const payload = openAIToAntigravity({
+      messages: [
+        { role: "system", content: "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes Agent itself, the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference." },
+        { role: "user", content: "Hi" },
+      ],
+    }, "gemini-3.8-flash-high", "p");
+    const text = payload.request.systemInstruction.parts[0].text;
+    expect(text).not.toContain("Hermes Agent");
+    expect(text).not.toContain("nousresearch.com");
+    expect(text).toContain("When the user needs help");
+    expect(text).toContain("authoritative reference");
+  });
+
   it("raises tiny output budgets for Claude", () => {
     const payload = openAIToAntigravity({ messages: [{ role: "user", content: "hi" }], max_tokens: 32 }, "claude-opus-5-5-medium", "p");
     expect(payload.request.generationConfig).toMatchObject({ responseModalities: ["TEXT"], maxOutputTokens: 256 });

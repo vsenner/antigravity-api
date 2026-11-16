@@ -59,6 +59,20 @@ function stableSessionId(contents: AntigravityContent[]): string {
   return `-${n.toString()}`;
 }
 
+const BLOCKED_PHRASES = [
+  /You run on Hermes Agent \(by Nous Research\)\.\s*/gi,
+  /https?:\/\/hermes-agent\.nousresearch\.com\S*/gi,
+  /\bHermes Agent\b/gi,
+];
+function stripBlockedPhrases(parts: AntigravityPart[]): AntigravityPart[] {
+  return parts.map((p) => {
+    if (typeof p.text !== "string") return p;
+    let t = p.text;
+    for (const re of BLOCKED_PHRASES) t = t.replace(re, "");
+    return t === p.text ? p : { ...p, text: t };
+  }).filter((p) => p.text !== "");
+}
+
 const sanitizeName = (name: string) => (name || "tool").replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 63);
 function jsonOrString(raw: string) { try { return JSON.parse(raw); } catch { return raw; } }
 
@@ -143,7 +157,8 @@ function buildGenerationConfig(input: any, upstreamModel: string) {
 export function openAIToAntigravity(input: any, upstreamModel: string, projectId: string) {
   const { contents, systemParts } = buildContents(input.messages ?? []);
   const request: any = { contents };
-  if (systemParts.length) request.systemInstruction = { role: "user", parts: systemParts };
+  const cleanSystem = stripBlockedPhrases(systemParts);
+  if (cleanSystem.length) request.systemInstruction = { role: "user", parts: cleanSystem };
   const generationConfig = buildGenerationConfig(input, upstreamModel);
   if (generationConfig) request.generationConfig = generationConfig;
   const tools = buildTools(input.tools);
