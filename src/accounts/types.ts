@@ -22,6 +22,8 @@ export interface RawAuthFile {
   refresh_token?: string;
   refreshToken?: string;
   disabled?: boolean;
+  /** Set when Google answered 403 "disabled … for violation of Terms of Service". */
+  banned?: { at: string; message: string };
   expired?: string;
   expires_in?: number;
   [key: string]: unknown;
@@ -36,6 +38,8 @@ export interface AccountRuntime {
   enabled: boolean;
   healthy: boolean;
   authFailed?: boolean;
+  /** Google disabled Antigravity for this account; excluded from routing until re-enabled. */
+  banned?: { at: string; message: string };
   requestCount: number;
   successCount: number;
   errorCount: number;

@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile, mkdir, unlink } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdir, unlink, rename } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { AccountRuntime, ModelStats, PublicAccount, RawAuthFile } from "./types.js";
 
@@ -7,27 +7,31 @@ export interface AccountStoreOptions {
   estimatedLimitTokens?: number;
 }
 
+export type Usage = { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+
+/**
+ * Auth files on disk are the source of truth for credentials and the ban flag;
+ * counters, health and cooldowns live in memory and survive file reloads.
+ */
 export class AccountStore {
-  private readonly authDir: string;
-  private readonly estimatedLimitTokens?: number;
   private readonly runtime = new Map<string, AccountRuntime>();
   private readonly raw = new Map<string, RawAuthFile>();
 
-  constructor(options: AccountStoreOptions) {
-    this.authDir = options.authDir;
-    this.estimatedLimitTokens = options.estimatedLimitTokens;
-  }
+  constructor(private readonly options: AccountStoreOptions) {}
+
+  get authDir() { return this.options.authDir; }
 
   async listPublicAccounts(): Promise<PublicAccount[]> {
     await this.refresh();
     return [...this.runtime.values()].map((account) => {
       const raw = this.raw.get(account.id) ?? {};
-      const estimatedLimit = account.estimatedLimitTokens;
+      const { consecutiveErrors: _hidden, ...rest } = account;
+      const limit = account.estimatedLimitTokens;
       return {
-        ...account,
+        ...rest,
         hasAccessToken: Boolean(raw.access_token || raw.accessToken),
         hasRefreshToken: Boolean(raw.refresh_token || raw.refreshToken),
-        usagePercent: estimatedLimit && estimatedLimit > 0 ? Math.min(100, (account.totalTokens / estimatedLimit) * 100) : null,
+        usagePercent: limit && limit > 0 ? Math.min(100, (account.totalTokens / limit) * 100) : null,
       };
     });
   }
@@ -42,34 +46,68 @@ export class AccountStore {
     return this.raw.get(accountId);
   }
 
+  /** Persist changed credentials (refreshed token, resolved project) for one account. */
+  async saveRawAuth(accountId: string, raw: RawAuthFile): Promise<void> {
+    const account = this.runtime.get(accountId);
+    const file = join(this.options.authDir, account?.authFile ?? `${accountId}.json`);
+    const tmp = `${file}.tmp-${process.pid}`;
+    await writeFile(tmp, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+    await rename(tmp, file);
+    this.raw.set(accountId, raw);
+  }
+
   async setEnabled(accountId: string, enabled: boolean): Promise<AccountRuntime | undefined> {
     await this.refresh();
     const account = this.runtime.get(accountId);
-    if (!account) return undefined;
+    const raw = this.raw.get(accountId);
+    if (!account || !raw) return undefined;
     account.enabled = enabled;
     if (enabled) {
+      // Re-enabling is also how an operator clears a ban after a successful appeal.
       account.healthy = true;
+      account.authFailed = false;
+      account.banned = undefined;
       account.cooldownUntil = undefined;
       account.consecutiveErrors = 0;
+      account.modelCooldowns?.clear();
+      account.modelCooldownsByModel?.clear();
     }
+    const { banned: _banned, ...rest } = raw;
+    await this.saveRawAuth(accountId, { ...(enabled ? rest : raw), disabled: !enabled });
     return account;
   }
 
-  recordSuccess(account: AccountRuntime, model: string, usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number }): void {
+  async markBanned(account: AccountRuntime, message: string): Promise<void> {
+    const banned = { at: new Date().toISOString(), message };
+    account.banned = banned;
+    account.healthy = false;
+    const raw = this.raw.get(account.id);
+    if (raw && !raw.banned) await this.saveRawAuth(account.id, { ...raw, banned });
+  }
+
+  recordSuccess(account: AccountRuntime, model: string, usage: Usage): void {
     account.successCount += 1;
     account.consecutiveErrors = 0;
     account.healthy = true;
     account.lastSuccessAt = Date.now();
-    this.applyUsage(account, model, usage, true);
+    const promptTokens = usage.promptTokens ?? 0;
+    const completionTokens = usage.completionTokens ?? 0;
+    const totalTokens = usage.totalTokens || promptTokens + completionTokens;
+    account.promptTokens += promptTokens;
+    account.completionTokens += completionTokens;
+    account.totalTokens += totalTokens;
+    const stats = this.modelStats(account, model);
+    stats.successes += 1;
+    stats.promptTokens += promptTokens;
+    stats.completionTokens += completionTokens;
+    stats.totalTokens += totalTokens;
   }
 
-  recordFailure(account: AccountRuntime, model: string, error: unknown): void {
+  recordFailure(account: AccountRuntime, model: string, message: string): void {
     account.errorCount += 1;
     account.lastErrorAt = Date.now();
-    account.lastError = error instanceof Error ? error.message : String(error);
-    const stats = this.modelStats(account, model);
-    stats.requests += 0;
-    stats.errors += 1;
+    account.lastError = message;
+    this.modelStats(account, model).errors += 1;
   }
 
   recordRequest(account: AccountRuntime, model: string): void {
@@ -79,9 +117,9 @@ export class AccountStore {
   }
 
   async createOrUpdateAuthFile(fileName: string, content: RawAuthFile): Promise<AccountRuntime> {
-    await mkdir(this.authDir, { recursive: true });
+    await mkdir(this.options.authDir, { recursive: true });
     const safeName = basename(fileName).endsWith(".json") ? basename(fileName) : `${basename(fileName)}.json`;
-    await writeFile(join(this.authDir, safeName), `${JSON.stringify(content, null, 2)}\n`, "utf8");
+    await writeFile(join(this.options.authDir, safeName), `${JSON.stringify(content, null, 2)}\n`, "utf8");
     await this.refresh();
     const id = safeName.replace(/\.json$/i, "");
     const account = this.runtime.get(id);
@@ -93,25 +131,10 @@ export class AccountStore {
     await this.refresh();
     const account = this.runtime.get(accountId);
     if (!account) return false;
-    await unlink(join(this.authDir, account.authFile));
+    await unlink(join(this.options.authDir, account.authFile));
     this.runtime.delete(accountId);
     this.raw.delete(accountId);
-    await this.refresh();
     return true;
-  }
-
-  private applyUsage(account: AccountRuntime, model: string, usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number }, success: boolean): void {
-    const promptTokens = usage.promptTokens ?? 0;
-    const completionTokens = usage.completionTokens ?? 0;
-    const totalTokens = usage.totalTokens ?? promptTokens + completionTokens;
-    account.promptTokens += promptTokens;
-    account.completionTokens += completionTokens;
-    account.totalTokens += totalTokens;
-    const stats = this.modelStats(account, model);
-    if (success) stats.successes += 1;
-    stats.promptTokens += promptTokens;
-    stats.completionTokens += completionTokens;
-    stats.totalTokens += totalTokens;
   }
 
   private modelStats(account: AccountRuntime, model: string): ModelStats {
@@ -121,44 +144,48 @@ export class AccountStore {
   }
 
   private async refresh(): Promise<void> {
-    await mkdir(this.authDir, { recursive: true });
-    const entries = await readdir(this.authDir, { withFileTypes: true });
+    await mkdir(this.options.authDir, { recursive: true });
+    const entries = await readdir(this.options.authDir, { withFileTypes: true });
     const seen = new Set<string>();
 
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const authFile = entry.name;
       const id = authFile.replace(/\.json$/i, "");
+      let raw: RawAuthFile;
+      try { raw = JSON.parse(await readFile(join(this.options.authDir, authFile), "utf8")) as RawAuthFile; } catch { continue; }
       seen.add(id);
-      const raw = JSON.parse(await readFile(join(this.authDir, authFile), "utf8")) as RawAuthFile;
       this.raw.set(id, raw);
       const previous = this.runtime.get(id);
+      if (previous) {
+        previous.email = String(raw.email || raw.account_email || raw.accountEmail || id);
+        previous.projectId = String(raw.project_id || raw.projectId || "") || undefined;
+        previous.banned = raw.banned; // the file decides: a fresh sign-in writes a file without the flag
+        previous.healthy = !raw.banned && !previous.authFailed;
+        continue;
+      }
       this.runtime.set(id, {
         id,
         authFile,
         email: String(raw.email || raw.account_email || raw.accountEmail || id),
         provider: "antigravity",
         projectId: String(raw.project_id || raw.projectId || "") || undefined,
-        enabled: previous?.enabled ?? raw.disabled !== true,
-        healthy: previous?.healthy ?? true,
-        requestCount: previous?.requestCount ?? 0,
-        successCount: previous?.successCount ?? 0,
-        errorCount: previous?.errorCount ?? 0,
-        totalTokens: previous?.totalTokens ?? 0,
-        promptTokens: previous?.promptTokens ?? 0,
-        completionTokens: previous?.completionTokens ?? 0,
-        consecutiveErrors: previous?.consecutiveErrors ?? 0,
-        lastUsedAt: previous?.lastUsedAt,
-        lastSuccessAt: previous?.lastSuccessAt,
-        lastErrorAt: previous?.lastErrorAt,
-        lastError: previous?.lastError,
-        cooldownUntil: previous?.cooldownUntil,
-        estimatedLimitTokens: this.estimatedLimitTokens,
-        modelStats: previous?.modelStats ?? {},
+        enabled: raw.disabled !== true,
+        healthy: !raw.banned,
+        banned: raw.banned,
+        requestCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        consecutiveErrors: 0,
+        estimatedLimitTokens: this.options.estimatedLimitTokens,
+        modelStats: {},
       });
     }
 
-    for (const id of this.runtime.keys()) {
+    for (const id of [...this.runtime.keys()]) {
       if (!seen.has(id)) {
         this.runtime.delete(id);
         this.raw.delete(id);

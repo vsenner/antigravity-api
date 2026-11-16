@@ -5,6 +5,7 @@ export interface RotationOptions {
   cooldownMs?: number;
 }
 
+/** Picks the least-used routable account and keeps per-model cooldowns. */
 export class RotationEngine {
   private readonly maxConsecutiveErrors: number;
   private readonly cooldownMs: number;
@@ -14,55 +15,57 @@ export class RotationEngine {
     this.cooldownMs = options.cooldownMs ?? 10 * 60_000;
   }
 
+  routable(account: AccountRuntime, model: string, now = Date.now()): boolean {
+    if (!account.enabled || account.banned || account.authFailed) return false;
+    if (account.cooldownUntil && account.cooldownUntil > now) return false;
+    const until = account.modelCooldowns?.get(model);
+    if (until && until > now) return false;
+    if (until) {
+      account.modelCooldowns?.delete(model);
+      account.modelCooldownsByModel?.delete(model);
+    }
+    return true;
+  }
+
   pick(accounts: AccountRuntime[], model = "unknown", exclude = new Set<string>()): AccountRuntime | undefined {
     const now = Date.now();
-    const available = accounts.filter((account) => {
-      if (exclude.has(account.id)) return false;
-      if (!account.enabled) return false;
-      if (account.authFailed) return false;
-      const modelKey = this.cooldownKey(account.id, model);
-      const until = account.modelCooldowns?.get(modelKey);
-      if (until && until <= now) {
-        account.modelCooldowns?.delete(modelKey);
-      } else if (until && until > now) {
-        return false;
-      }
-      return account.healthy;
-    });
-    if (available.length === 0) return undefined;
-
-    // Least-used selection keeps spending even globally and per model.
-    available.sort((a, b) => {
-      const aModel = a.modelStats?.[model]?.totalTokens ?? 0;
-      const bModel = b.modelStats?.[model]?.totalTokens ?? 0;
-      if (aModel !== bModel) return aModel - bModel;
-      if (a.totalTokens !== b.totalTokens) return a.totalTokens - b.totalTokens;
-      return (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0);
-    });
+    const available = accounts.filter((account) => !exclude.has(account.id) && this.routable(account, model, now));
+    // Least-used first keeps spending even per model and overall.
+    available.sort((a, b) =>
+      (a.modelStats?.[model]?.totalTokens ?? 0) - (b.modelStats?.[model]?.totalTokens ?? 0)
+      || a.totalTokens - b.totalTokens
+      || (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
     return available[0];
   }
 
-  recordFailure(account: AccountRuntime, model: string, error: unknown, opts: { cooldownOverrideMs?: number; authFailed?: boolean } = {}): void {
-    const key = this.cooldownKey(account.id, model);
+  /** Earliest moment any of these accounts can serve the model again (for Retry-After). */
+  nextAvailableAt(accounts: AccountRuntime[], model: string): number | undefined {
+    const times = accounts
+      .filter((a) => a.enabled && !a.banned && !a.authFailed)
+      .map((a) => Math.max(a.modelCooldowns?.get(model) ?? 0, a.cooldownUntil ?? 0));
+    return times.length ? Math.min(...times) : undefined;
+  }
+
+  recordFailure(account: AccountRuntime, model: string, message: string, opts: { cooldownMs?: number; authFailed?: boolean } = {}): void {
     account.consecutiveErrors = (account.consecutiveErrors ?? 0) + 1;
     account.lastErrorAt = Date.now();
-    account.lastError = error instanceof Error ? error.message : String(error);
+    account.lastError = message;
     if (opts.authFailed) {
       account.authFailed = true;
       account.healthy = false;
       return;
     }
-    if (account.consecutiveErrors >= this.maxConsecutiveErrors || opts.cooldownOverrideMs) {
-      account.modelCooldowns ??= new Map<string, number>();
-      account.modelCooldowns.set(key, Date.now() + (opts.cooldownOverrideMs ?? this.cooldownMs));
-      account.modelCooldownsByModel ??= new Map<string, { until: number; reason: string }>();
-      account.modelCooldownsByModel.set(model, { until: Date.now() + (opts.cooldownOverrideMs ?? this.cooldownMs), reason: account.lastError });
-      if (opts.cooldownOverrideMs && opts.cooldownOverrideMs > this.cooldownMs) {
-        account.healthy = false;
-        account.cooldownUntil = Date.now() + opts.cooldownOverrideMs;
-      }
-    }
+    if (!opts.cooldownMs && account.consecutiveErrors < this.maxConsecutiveErrors) return;
+    const until = Date.now() + (opts.cooldownMs ?? this.cooldownMs);
+    account.modelCooldowns ??= new Map();
+    account.modelCooldowns.set(model, until);
+    account.modelCooldownsByModel ??= new Map();
+    account.modelCooldownsByModel.set(model, { until, reason: message });
   }
 
-  private cooldownKey(accountId: string, model: string): string { return `${accountId}|${model}`; }
+  recordSuccess(account: AccountRuntime, model: string): void {
+    account.consecutiveErrors = 0;
+    account.modelCooldowns?.delete(model);
+    account.modelCooldownsByModel?.delete(model);
+  }
 }

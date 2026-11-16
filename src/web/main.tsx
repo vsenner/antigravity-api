@@ -68,6 +68,7 @@ export type Account = {
   projectId?: string;
   enabled: boolean;
   healthy: boolean;
+  banned?: { at: string; message: string };
   requestCount: number;
   successCount: number;
   errorCount: number;
@@ -379,8 +380,8 @@ export function App() {
                       {a.quota?.projectId || a.projectId || "no-project"} · {isPro ? "Google AI Pro" : "Free Tier"}
                     </div>
                   </div>
-                  <Badge variant={a.healthy ? "outline" : "destructive"} className="text-[9px] py-0 px-1 shrink-0 font-mono">
-                    {a.healthy ? "HEALTHY" : "LIMITED"}
+                  <Badge variant={a.healthy && !a.banned ? "outline" : "destructive"} className="text-[9px] py-0 px-1 shrink-0 font-mono" title={a.banned?.message}>
+                    {a.banned ? "BANNED" : a.healthy ? "HEALTHY" : "LIMITED"}
                   </Badge>
                 </div>
 

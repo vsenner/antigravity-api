@@ -33,10 +33,18 @@ describe("RotationEngine", () => {
     const engine = new RotationEngine({ maxConsecutiveErrors: 2, cooldownMs: 60_000 });
     const a = account("a");
 
-    engine.recordFailure(a, "any-model", new Error("boom"));
+    engine.recordFailure(a, "any-model", "boom");
     expect(a.healthy).toBe(true);
-    engine.recordFailure(a, "any-model", new Error("boom again"));
+    engine.recordFailure(a, "any-model", "boom again");
 
-    expect(a.modelCooldowns?.get("a|any-model")).toBeGreaterThan(Date.now());
+    expect(a.modelCooldowns?.get("any-model")).toBeGreaterThan(Date.now());
+    expect(engine.pick([a], "any-model")).toBeUndefined();
+    expect(engine.pick([a], "other-model")?.id).toBe("a");
+  });
+
+  it("never picks banned or auth-failed accounts", () => {
+    const engine = new RotationEngine();
+    const accounts = [account("banned", { banned: { at: "now", message: "ToS" } }), account("auth", { authFailed: true }), account("ok", { totalTokens: 999 })];
+    expect(engine.pick(accounts)?.id).toBe("ok");
   });
 });
