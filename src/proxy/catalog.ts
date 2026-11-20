@@ -86,11 +86,12 @@ export class ModelCatalog {
     for (const [id, info] of Object.entries<any>(live)) {
       if (!isAgentModel(id, info) || HIDDEN_ALIASES.has(id) || RETIRED_MODELS.has(id)) continue;
       const known = MODELS.find((m) => m.upstream === id);
+      const effectiveContext = id.startsWith("gemini-4") ? Math.min(Number(info.maxTokens) || 64000, 64000) : info.maxTokens;
       out.set(known?.id ?? id, {
         id: known?.id ?? id, object: "model", owned_by: "antigravity",
         display_name: info.displayName || known?.displayName || id,
         family: familyOf(id), upstream: id, aliases: known?.aliases ?? [],
-        context_length: info.maxTokens, max_output_tokens: info.maxOutputTokens,
+        context_length: effectiveContext, max_output_tokens: info.maxOutputTokens,
         supports_images: Boolean(info.supportsImages), supports_thinking: Boolean(info.supportsThinking),
         source: "upstream",
       });
