@@ -1,8 +1,8 @@
-import { SHORT_USER_AGENT } from "../config.js";
+import { USER_AGENT } from "../config.js";
 import { fetchAvailableModels, loadCodeAssist, postInternal } from "./code-assist.js";
 
 export interface QuotaMetric { name: string; displayName?: string; remainingPercent: number; resetTime?: string; source: "models" | "summary" }
-export interface AccountQuotaStatus { fetchedAt: number; tier?: string; projectId?: string; metrics: QuotaMetric[]; error?: string }
+export interface AccountQuotaStatus { fetchedAt: number; tier?: string; projectId?: string; metrics: QuotaMetric[]; availableModels?: string[]; error?: string; errorStatus?: number }
 
 const pct = (f: unknown) => Math.max(0, Math.min(100, Math.round(Number(f || 0) * 1000) / 10));
 
@@ -31,7 +31,7 @@ export class AntigravityQuotaClient {
     if (!projectId) return { fetchedAt: Date.now(), metrics: [], tier, error: info.error || "no project_id" };
 
     const [summary, models] = await Promise.all([
-      postInternal("retrieveUserQuotaSummary", token, { project: projectId }, SHORT_USER_AGENT),
+      postInternal("retrieveUserQuotaSummary", token, { project: projectId }, USER_AGENT),
       fetchAvailableModels(token, projectId),
     ]);
     const metrics: QuotaMetric[] = [];
@@ -41,8 +41,10 @@ export class AntigravityQuotaClient {
         metrics.push({ name: String(bucket.bucketId || group.groupId || bucket.displayName || "quota"), displayName: bucket.displayName || group.displayName, remainingPercent: pct(bucket.remainingFraction), resetTime: bucket.resetTime, source: "summary" });
       }
     }
+    let availableModels: string[] | undefined;
     if (models.ok) {
       const all = models.json?.models || {};
+      availableModels = Object.keys(all);
       const tieredId = models.json?.tieredModelIds?.flash?.[0] || "gemini-3.8-flash-tiered";
       const gemini = all[tieredId]?.quotaInfo || all["gemini-3.8-flash-high"]?.quotaInfo;
       if (gemini) {
@@ -55,7 +57,8 @@ export class AntigravityQuotaClient {
       }
     }
     const error = !summary.ok ? `retrieveUserQuotaSummary ${summary.status}: ${summary.message}` : !models.ok ? `fetchAvailableModels ${models.status}: ${models.message}` : undefined;
+    const errorStatus = !summary.ok ? summary.status : !models.ok ? models.status : undefined;
     const seen = new Set<string>();
-    return { fetchedAt: Date.now(), projectId, tier, metrics: metrics.filter((m) => { const k = `${m.name}|${m.resetTime || ""}`; if (seen.has(k)) return false; seen.add(k); return true; }), error };
+    return { fetchedAt: Date.now(), projectId, tier, availableModels, metrics: metrics.filter((m) => { const k = `${m.name}|${m.resetTime || ""}`; if (seen.has(k)) return false; seen.add(k); return true; }), error, errorStatus };
   }
 }

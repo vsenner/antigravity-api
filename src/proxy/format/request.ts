@@ -59,16 +59,46 @@ function stableSessionId(contents: AntigravityContent[]): string {
   return `-${n.toString()}`;
 }
 
-const BLOCKED_PHRASES = [
-  /You run on Hermes Agent \(by Nous Research\)\.\s*/gi,
-  /https?:\/\/hermes-agent\.nousresearch\.com\S*/gi,
-  /\bHermes Agent\b/gi,
+const BLOCKED_PHRASES: [RegExp, string][] = [
+  [/You run on Hermes Agent \(by Nous Research\)\.\s*/gi, ""],
+  [/https?:\/\/hermes-agent\.nousresearch\.com\S*/gi, ""],
+  [/https?:\/\/portal\.nousresearch\.com\S*/gi, ""],
+  [/\bHermes Agent\b/gi, "Assistant"],
+  [/\bNous Research\b/gi, ""],
+  [/\bnousresearch\b/gi, ""],
+  [/\bhermes-agent\b/gi, "assistant"],
+  [/\bHermes\b/g, "Assistant"],
+  [/\bhermes\b/g, "assistant"],
+];
+const BLOCKED_SECTIONS: RegExp[] = [
+  /<!--[\s\S]*?-->/g,
+  /# (?:Assistant|Hermes) (?:Agent )?Persona\s*/gi,
+  /## Orchestrator-first operating mode\n[\s\S]*?(?=\n##|\n#[^#]|$)/g,
+  /<available_skills>[\s\S]*?<\/available_skills>/g,
+  /## Skills\n[\s\S]*?Only proceed without loading a skill[^\n]*/g,
+  /## Skill Safety Rule\n[\s\S]*?(?=\n##|\n#[^#]|$)/g,
+  /## Mid-turn user steering\n[\s\S]*?(?=\n##|\n#[^#]|$)/g,
+  /# Tool-use enforcement\n[\s\S]*?(?=\n##|\n#[^#]|$)/g,
+  /# Google model operational directives\n[\s\S]*?(?=\n##|\n#[^#]|$)/g,
+  /# Finishing the job\n[\s\S]*?(?=\n##|\n#[^#]|$)/g,
+  /# Parallel tool calls\n[\s\S]*?(?=\n##|\n#[^#]|$)/g,
+  /═{3,}[^\n]*MEMORY[^\n]*═{3,}\n[\s\S]*?(?=═{3,}|$)/g,
+  /═{3,}[^\n]*USER PROFILE[^\n]*═{3,}\n[\s\S]*?(?=═{3,}|\n##|\n#[^#]|$)/g,
+  /# .*runtime environment[\s\S]*?(?=<!-- End|$)/gi,
+  /## Current Session Context\n[\s\S]*$/g,
+  /Active (?:Assistant|Hermes) profile:[^\n]*/gi,
+  /\bskill_view\([^)]*\)/g,
+  /\bskill_manage\([^)]*\)/g,
+  /\[OUT-OF-BAND USER MESSAGE[^\]]*\][\s\S]*?\[\/OUT-OF-BAND USER MESSAGE\]/g,
+  /You have persistent memory,[\s\S]*?(?=\n##|\n#[^#]|$)/g,
 ];
 function stripBlockedPhrases(parts: AntigravityPart[]): AntigravityPart[] {
   return parts.map((p) => {
     if (typeof p.text !== "string") return p;
     let t = p.text;
-    for (const re of BLOCKED_PHRASES) t = t.replace(re, "");
+    for (const re of BLOCKED_SECTIONS) t = t.replace(re, "");
+    for (const [re, repl] of BLOCKED_PHRASES) t = t.replace(re, repl);
+    t = t.replace(/\n{3,}/g, "\n\n").replace(/ {2,}/g, " ").trim();
     return t === p.text ? p : { ...p, text: t };
   }).filter((p) => p.text !== "");
 }

@@ -69,6 +69,9 @@ export type Account = {
   enabled: boolean;
   healthy: boolean;
   banned?: { at: string; message: string };
+  verificationRequired?: { at: string; message: string };
+  supportedModels?: string[];
+  unsupportedModels?: string[];
   requestCount: number;
   successCount: number;
   errorCount: number;
@@ -380,8 +383,8 @@ export function App() {
                       {a.quota?.projectId || a.projectId || "no-project"} · {isPro ? "Google AI Pro" : "Free Tier"}
                     </div>
                   </div>
-                  <Badge variant={a.healthy && !a.banned ? "outline" : "destructive"} className="text-[9px] py-0 px-1 shrink-0 font-mono" title={a.banned?.message}>
-                    {a.banned ? "BANNED" : a.healthy ? "HEALTHY" : "LIMITED"}
+                  <Badge variant={a.healthy && !a.banned && !a.verificationRequired ? "outline" : "destructive"} className="text-[9px] py-0 px-1 shrink-0 font-mono" title={a.banned?.message || a.verificationRequired?.message}>
+                    {a.banned ? "BANNED" : a.verificationRequired ? "VERIFY" : a.healthy ? "HEALTHY" : "LIMITED"}
                   </Badge>
                 </div>
 
@@ -525,6 +528,8 @@ function AddGoogleButton({ token, onDone }: { token: string; onDone: () => void 
     }
   }
 
+  const [urlCopied, setUrlCopied] = React.useState(false);
+
   return (
     <>
       <Button variant="outline" size="sm" className="h-7 text-xs px-2" onClick={start} disabled={busy}>
@@ -535,9 +540,20 @@ function AddGoogleButton({ token, onDone }: { token: string; onDone: () => void 
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <Card className="w-full max-w-md p-4 space-y-3">
             <div className="font-bold text-sm">Authorize Google Account</div>
-            <Button size="sm" className="w-full text-xs h-7" onClick={() => window.open(flow.url, "_blank")}>
-              Open Google Auth <ExternalLink className="size-3 ml-1" />
-            </Button>
+            <div className="flex gap-1.5">
+              <input
+                className="flex-1 min-w-0 rounded border bg-muted/30 px-2 py-1 text-[10px] font-mono text-muted-foreground select-all truncate"
+                value={flow.url}
+                readOnly
+                onFocus={(e) => e.target.select()}
+              />
+              <Button size="sm" variant="outline" className="h-7 text-xs px-2 shrink-0" onClick={() => { navigator.clipboard.writeText(flow.url); setUrlCopied(true); setTimeout(() => setUrlCopied(false), 2000); }}>
+                {urlCopied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+              </Button>
+              <Button size="sm" className="h-7 text-xs px-2 shrink-0" onClick={() => window.open(flow.url, "_blank")}>
+                Open <ExternalLink className="size-3 ml-1" />
+              </Button>
+            </div>
             <input
               className="w-full rounded border bg-background px-2 py-1 text-xs font-mono"
               value={callbackUrl}

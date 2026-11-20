@@ -1,5 +1,6 @@
 import type { AccountStore } from "../accounts/store.js";
 import type { TokenManager } from "../accounts/tokens.js";
+import { classifyUpstreamError } from "../proxy/errors.js";
 import type { AntigravityQuotaClient, AccountQuotaStatus } from "../proxy/quota-client.js";
 import { MODELS, RETIRED_MODELS } from "../proxy/models.js";
 
@@ -8,9 +9,29 @@ const PAID_TIERS = new Set(["g1-pro-tier", "g1-ultra-tier"]);
 /** Accounts with live quota windows, run stats and the model list, for the dashboard. */
 export async function accountsStatus(store: AccountStore, tokens: TokenManager, quotaClient: AntigravityQuotaClient) {
   const accounts = await store.listPublicAccounts();
+  const runtimeAccounts = await store.listRuntimeAccounts();
+  const runtimeById = new Map(runtimeAccounts.map((a) => [a.id, a]));
+
   const enriched = await Promise.all(accounts.map(async (account) => {
     const quota: AccountQuotaStatus = await quotaClient.getStatus(account.id, () => tokens.get(account.id), account.projectId);
-    return { ...account, quota };
+    const rt = runtimeById.get(account.id);
+    if (quota.availableModels) {
+      store.setSupportedModels(account.id, quota.availableModels);
+    }
+    if (quota.error && quota.errorStatus && rt) {
+      const classified = classifyUpstreamError(quota.errorStatus, { error: { code: quota.errorStatus, message: quota.error } });
+      if (classified.kind === "banned") await store.markBanned(rt, quota.error);
+      else if (classified.kind === "verification_required") await store.markVerificationRequired(rt, quota.error);
+    } else if (!quota.error && rt?.verificationRequired) {
+      await store.clearVerificationRequired(account.id);
+    }
+    const updated = rt ? {
+      healthy: rt.healthy,
+      banned: rt.banned,
+      verificationRequired: rt.verificationRequired,
+      supportedModels: rt.supportedModels ? [...rt.supportedModels] : account.supportedModels,
+    } : {};
+    return { ...account, ...updated, quota };
   }));
   const stats = await summaryFromAccounts(enriched);
   return { accounts: enriched, stats, models: MODELS.map(m => ({ id: m.id, displayName: m.displayName, aliases: m.aliases })) };
@@ -62,11 +83,13 @@ export function formatOverview(status: { accounts: any[]; stats: any; models: an
     return {
       id: a.id,
       email: a.email,
-      healthy: a.healthy && !a.banned,
+      healthy: a.healthy && !a.banned && !a.verificationRequired,
       enabled: a.enabled,
       banned: Boolean(a.banned),
       banReason: a.banned?.message,
       bannedAt: a.banned?.at,
+      verificationRequired: Boolean(a.verificationRequired),
+      verificationReason: a.verificationRequired?.message,
       hasAuthError: Boolean(a.quota?.error && /401|auth/i.test(a.quota.error)),
       quotaError: a.quota?.error,
       tier: a.quota?.tier || (isPro ? "g1-pro-tier" : "free-tier"),

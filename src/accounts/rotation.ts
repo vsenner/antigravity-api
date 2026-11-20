@@ -16,7 +16,8 @@ export class RotationEngine {
   }
 
   routable(account: AccountRuntime, model: string, now = Date.now()): boolean {
-    if (!account.enabled || account.banned || account.authFailed) return false;
+    if (!account.enabled || account.banned || account.verificationRequired || account.authFailed) return false;
+    if (account.unsupportedModels?.has(model)) return false;
     if (account.cooldownUntil && account.cooldownUntil > now) return false;
     const until = account.modelCooldowns?.get(model);
     if (until && until > now) return false;
@@ -27,12 +28,17 @@ export class RotationEngine {
     return true;
   }
 
-  pick(accounts: AccountRuntime[], model = "unknown", exclude = new Set<string>()): AccountRuntime | undefined {
+  pick(accounts: AccountRuntime[], model = "unknown", exclude = new Set<string>(), upstreamModel?: string): AccountRuntime | undefined {
     const now = Date.now();
     const available = accounts.filter((account) => !exclude.has(account.id) && this.routable(account, model, now));
-    // Least-used first keeps spending even per model and overall.
+    // Prefer accounts that explicitly list the upstream model (when known), then least-used.
+    const supportsScore = (a: AccountRuntime) => {
+      if (!upstreamModel || !a.supportedModels) return 1;
+      return a.supportedModels.has(upstreamModel) ? 0 : 2;
+    };
     available.sort((a, b) =>
-      (a.modelStats?.[model]?.totalTokens ?? 0) - (b.modelStats?.[model]?.totalTokens ?? 0)
+      supportsScore(a) - supportsScore(b)
+      || (a.modelStats?.[model]?.totalTokens ?? 0) - (b.modelStats?.[model]?.totalTokens ?? 0)
       || a.totalTokens - b.totalTokens
       || (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
     return available[0];
@@ -41,7 +47,7 @@ export class RotationEngine {
   /** Earliest moment any of these accounts can serve the model again (for Retry-After). */
   nextAvailableAt(accounts: AccountRuntime[], model: string): number | undefined {
     const times = accounts
-      .filter((a) => a.enabled && !a.banned && !a.authFailed)
+      .filter((a) => a.enabled && !a.banned && !a.verificationRequired && !a.authFailed && !a.unsupportedModels?.has(model))
       .map((a) => Math.max(a.modelCooldowns?.get(model) ?? 0, a.cooldownUntil ?? 0));
     return times.length ? Math.min(...times) : undefined;
   }

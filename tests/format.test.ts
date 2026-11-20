@@ -71,18 +71,19 @@ describe("request adapter", () => {
     ]);
   });
 
-  it("strips blocked identity phrases and URLs from system instructions", () => {
+  it("strips blocked identity phrases, URLs, and replaces Hermes with Assistant", () => {
     const payload = openAIToAntigravity({
       messages: [
-        { role: "system", content: "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes Agent itself, the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference." },
+        { role: "system", content: "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes Agent itself, the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference. Hermes operates with a realist mindset. Use hermes-dashboard-ops skill." },
         { role: "user", content: "Hi" },
       ],
     }, "gemini-3.8-flash-high", "p");
     const text = payload.request.systemInstruction.parts[0].text;
-    expect(text).not.toContain("Hermes Agent");
-    expect(text).not.toContain("nousresearch.com");
-    expect(text).toContain("When the user needs help");
-    expect(text).toContain("authoritative reference");
+    expect(text).not.toContain("Hermes");
+    expect(text).not.toContain("hermes");
+    expect(text).not.toContain("nousresearch");
+    expect(text).toContain("Assistant operates");
+    expect(text).toContain("assistant-dashboard-ops");
   });
 
   it("raises tiny output budgets for Claude", () => {
@@ -97,7 +98,7 @@ describe("model resolution", () => {
     expect(resolveModel("claude-sonnet-5-5").upstream).toBe("claude-sonnet-5-5-medium");
     expect(resolveModel("gemini-3.5-flash-lite").upstream).toBe("gemini-3.5-flash-lite");
     expect(resolveModel("gemini-9-ultra").upstream).toBe("gemini-9-ultra");
-    expect(resolveModel(undefined).id).toBe("gemini-3.8-flash-high");
+    expect(resolveModel(undefined).id).toBe("gemini-4-hydrogen-sonar");
   });
 });
 

@@ -27,6 +27,44 @@ export interface UpstreamCatalog { fetchedAt: number; models: Record<string, any
 export class ModelCatalog {
   private cached?: UpstreamCatalog;
 
+  async upstreamPool(
+    credsList: { accountId: string; token: string; projectId: string }[],
+    onAccountModels?: (accountId: string, modelIds: string[]) => void,
+    force = false,
+  ): Promise<UpstreamCatalog | undefined> {
+    if (!force && this.cached && Date.now() - this.cached.fetchedAt < CATALOG_TTL_MS) return this.cached;
+    if (!credsList.length) return this.cached;
+    const results = await Promise.all(credsList.map(async (c) => {
+      const res = await fetchAvailableModels(c.token, c.projectId).catch(() => undefined);
+      return { accountId: c.accountId, res };
+    }));
+    const mergedModels: Record<string, any> = {};
+    let defaultAgentModelId: string | undefined;
+    const agentModelIds = new Set<string>();
+    let anyOk = false;
+    for (const { accountId, res } of results) {
+      if (!res?.ok) continue;
+      anyOk = true;
+      const models = res.json.models || {};
+      onAccountModels?.(accountId, Object.keys(models));
+      for (const [id, info] of Object.entries<any>(models)) {
+        if (!mergedModels[id]) mergedModels[id] = info;
+      }
+      if (!defaultAgentModelId && res.json.defaultAgentModelId) defaultAgentModelId = res.json.defaultAgentModelId;
+      for (const id of res.json.agentModelSorts?.[0]?.groups?.flatMap((g: any) => g.modelIds || []) || []) {
+        agentModelIds.add(id);
+      }
+    }
+    if (!anyOk) return this.cached;
+    this.cached = {
+      fetchedAt: Date.now(),
+      models: mergedModels,
+      defaultAgentModelId,
+      agentModelIds: [...agentModelIds],
+    };
+    return this.cached;
+  }
+
   async upstream(creds: () => Promise<{ token: string; projectId: string } | undefined>, force = false): Promise<UpstreamCatalog | undefined> {
     if (!force && this.cached && Date.now() - this.cached.fetchedAt < CATALOG_TTL_MS) return this.cached;
     const c = await creds().catch(() => undefined);

@@ -6,15 +6,23 @@
  * Keep ANTIGRAVITY_VERSION in step with a released Antigravity build, then
  * check GET /api/models/upstream?refresh=1 (management token) for the live catalogue.
  */
-export const ANTIGRAVITY_VERSION = process.env.ANTIGRAVITY_VERSION || "2.32.0";
-export const ANTIGRAVITY_PLATFORM = process.env.ANTIGRAVITY_PLATFORM || "darwin/arm64";
+export const ANTIGRAVITY_VERSION = process.env.ANTIGRAVITY_VERSION || "2.33.0";
 
-/** User-Agent sent on generate, quota and catalogue calls (the IDE's Node client). */
+/**
+ * Two User-Agent formats from the official binary (reverse-engineered 19.11.2026):
+ * - loadCodeAssist: "antigravity/VERSION OS/ARCH google-api-nodejs-client/10.3.0"
+ * - generate/catalog: "antigravity/VERSION (aidev_client; os_type=OS; arch=ARCH)"
+ */
+const OS_TYPE = process.env.ANTIGRAVITY_OS_TYPE || "linux";
+const ARCH = process.env.ANTIGRAVITY_ARCH || "amd64";
+
+/** User-Agent for loadCodeAssist and onboardUser. */
+export const QUOTA_USER_AGENT = process.env.ANTIGRAVITY_USER_AGENT
+  || `antigravity/${ANTIGRAVITY_VERSION} ${OS_TYPE}/${ARCH} google-api-nodejs-client/10.3.0`;
+
+/** User-Agent for generateContent, fetchAvailableModels, streamGenerateContent. */
 export const USER_AGENT = process.env.ANTIGRAVITY_USER_AGENT
-  || `antigravity/${ANTIGRAVITY_VERSION} ${ANTIGRAVITY_PLATFORM} google-api-nodejs-client/10.3.0`;
-
-/** Short form the IDE uses for retrieveUserQuotaSummary. */
-export const SHORT_USER_AGENT = `antigravity/${ANTIGRAVITY_VERSION} ${ANTIGRAVITY_PLATFORM}`;
+  || `antigravity/${ANTIGRAVITY_VERSION} (aidev_client; os_type=${OS_TYPE}; arch=${ARCH})`;
 
 /** Metadata block loadCodeAssist expects from the IDE. */
 export const IDE_METADATA = { ideName: "antigravity", ideType: "ANTIGRAVITY", ideVersion: ANTIGRAVITY_VERSION, platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" } as const;

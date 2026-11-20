@@ -15,7 +15,7 @@ import { MAX_COOLDOWN_MS } from "../config.js";
  * - server:    other 5xx.
  * - bad_request: 400; the request is wrong the same way on every account.
  */
-export type FailureKind = "banned" | "auth" | "forbidden" | "not_found" | "retired" | "quota" | "rejected" | "capacity" | "server" | "bad_request" | "unknown";
+export type FailureKind = "banned" | "verification_required" | "auth" | "forbidden" | "not_found" | "retired" | "quota" | "rejected" | "capacity" | "server" | "bad_request" | "unknown";
 
 export interface UpstreamFailure {
   kind: FailureKind;
@@ -32,6 +32,7 @@ export interface UpstreamFailure {
 
 const BARE_429 = /^resource has been exhausted \(e\.g\. check quota\)\.?$/i;
 const TOS_BAN = /violation of terms of service|disabled in this account/i;
+const VERIFY_ACCOUNT = /verify your account to continue/i;
 
 /** Streaming endpoints wrap errors in a one-element array; unwrap to `{ error }`. */
 export function errorPayload(body: unknown): { code?: number; message?: string; status?: string; details?: any[] } {
@@ -47,12 +48,13 @@ export function classifyUpstreamError(status: number, body: unknown): UpstreamFa
 
   if (status === 401) return { ...base, kind: "auth", tryNextBase: false, tryNextAccount: true };
   if (status === 403 && TOS_BAN.test(message)) return { ...base, kind: "banned", tryNextBase: false, tryNextAccount: true };
+  if (status === 403 && VERIFY_ACCOUNT.test(message)) return { ...base, kind: "verification_required", tryNextBase: false, tryNextAccount: true };
   if (status === 403) return { ...base, kind: "forbidden", cooldownMs: 10 * 60_000, tryNextBase: false, tryNextAccount: true };
   if (status === 404) return { ...base, kind: "not_found", cooldownMs: 60 * 60_000, tryNextBase: true, tryNextAccount: true };
   if (status === 400) return { ...base, kind: "bad_request", tryNextBase: false, tryNextAccount: false };
   if (status === 429) {
     const cooldownMs = retryDelayMs(error.details) ?? resetsInMs(message);
-    if (cooldownMs !== undefined) return { ...base, kind: "quota", cooldownMs: Math.min(cooldownMs, MAX_COOLDOWN_MS), tryNextBase: false, tryNextAccount: true };
+    if (cooldownMs !== undefined) return { ...base, kind: "quota", cooldownMs, tryNextBase: false, tryNextAccount: true };
     if (BARE_429.test(message)) return { ...base, kind: "rejected", cooldownMs: 15_000, tryNextBase: false, tryNextAccount: true };
     const quotaWords = /quota/i.test(message) && !BARE_429.test(message);
     return { ...base, kind: "quota", cooldownMs: quotaWords ? Math.min(60 * 60_000, MAX_COOLDOWN_MS) : 60_000, tryNextBase: false, tryNextAccount: true };

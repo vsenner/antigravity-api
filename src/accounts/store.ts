@@ -32,6 +32,10 @@ export class AccountStore {
         hasAccessToken: Boolean(raw.access_token || raw.accessToken),
         hasRefreshToken: Boolean(raw.refresh_token || raw.refreshToken),
         usagePercent: limit && limit > 0 ? Math.min(100, (account.totalTokens / limit) * 100) : null,
+        supportedModels: account.supportedModels ? [...account.supportedModels] : undefined,
+        unsupportedModels: account.unsupportedModels ? [...account.unsupportedModels] : undefined,
+        modelCooldowns: account.modelCooldowns ? Object.fromEntries(account.modelCooldowns) : undefined,
+        modelCooldownsByModel: account.modelCooldownsByModel ? Object.fromEntries(account.modelCooldownsByModel) : undefined,
       };
     });
   }
@@ -63,16 +67,18 @@ export class AccountStore {
     if (!account || !raw) return undefined;
     account.enabled = enabled;
     if (enabled) {
-      // Re-enabling is also how an operator clears a ban after a successful appeal.
+      // Re-enabling is also how an operator clears a ban or verification flag after resolving it.
       account.healthy = true;
       account.authFailed = false;
       account.banned = undefined;
+      account.verificationRequired = undefined;
       account.cooldownUntil = undefined;
       account.consecutiveErrors = 0;
       account.modelCooldowns?.clear();
       account.modelCooldownsByModel?.clear();
+      account.unsupportedModels?.clear();
     }
-    const { banned: _banned, ...rest } = raw;
+    const { banned: _banned, verification_required: _ver, ...rest } = raw;
     await this.saveRawAuth(accountId, { ...(enabled ? rest : raw), disabled: !enabled });
     return account;
   }
@@ -83,6 +89,38 @@ export class AccountStore {
     account.healthy = false;
     const raw = this.raw.get(account.id);
     if (raw && !raw.banned) await this.saveRawAuth(account.id, { ...raw, banned });
+  }
+
+  async markVerificationRequired(account: AccountRuntime, message: string): Promise<void> {
+    const verificationRequired = { at: new Date().toISOString(), message };
+    account.verificationRequired = verificationRequired;
+    account.healthy = false;
+    const raw = this.raw.get(account.id);
+    if (raw && !raw.verification_required) await this.saveRawAuth(account.id, { ...raw, verification_required: verificationRequired });
+  }
+
+  async clearVerificationRequired(accountId: string): Promise<void> {
+    const account = this.runtime.get(accountId);
+    if (account) {
+      account.verificationRequired = undefined;
+      account.healthy = !account.banned && !account.authFailed;
+    }
+    const raw = this.raw.get(accountId);
+    if (raw?.verification_required) {
+      const { verification_required: _ver, ...rest } = raw;
+      await this.saveRawAuth(accountId, rest);
+    }
+  }
+
+  setSupportedModels(accountId: string, models: Iterable<string>): void {
+    const account = this.runtime.get(accountId);
+    if (!account) return;
+    account.supportedModels = new Set(models);
+  }
+
+  markModelUnsupported(account: AccountRuntime, model: string): void {
+    account.unsupportedModels ??= new Set();
+    account.unsupportedModels.add(model);
   }
 
   recordSuccess(account: AccountRuntime, model: string, usage: Usage): void {
@@ -161,7 +199,8 @@ export class AccountStore {
         previous.email = String(raw.email || raw.account_email || raw.accountEmail || id);
         previous.projectId = String(raw.project_id || raw.projectId || "") || undefined;
         previous.banned = raw.banned; // the file decides: a fresh sign-in writes a file without the flag
-        previous.healthy = !raw.banned && !previous.authFailed;
+        previous.verificationRequired = raw.verification_required;
+        previous.healthy = !raw.banned && !raw.verification_required && !previous.authFailed;
         continue;
       }
       this.runtime.set(id, {
@@ -171,8 +210,9 @@ export class AccountStore {
         provider: "antigravity",
         projectId: String(raw.project_id || raw.projectId || "") || undefined,
         enabled: raw.disabled !== true,
-        healthy: !raw.banned,
+        healthy: !raw.banned && !raw.verification_required,
         banned: raw.banned,
+        verificationRequired: raw.verification_required,
         requestCount: 0,
         successCount: 0,
         errorCount: 0,

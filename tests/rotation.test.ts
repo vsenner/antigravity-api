@@ -42,9 +42,25 @@ describe("RotationEngine", () => {
     expect(engine.pick([a], "other-model")?.id).toBe("a");
   });
 
-  it("never picks banned or auth-failed accounts", () => {
+  it("never picks banned, verification-required, unsupported-model, or auth-failed accounts", () => {
     const engine = new RotationEngine();
-    const accounts = [account("banned", { banned: { at: "now", message: "ToS" } }), account("auth", { authFailed: true }), account("ok", { totalTokens: 999 })];
-    expect(engine.pick(accounts)?.id).toBe("ok");
+    const accounts = [
+      account("banned", { banned: { at: "now", message: "ToS" } }),
+      account("verify", { verificationRequired: { at: "now", message: "Verify your account to continue." } }),
+      account("unsupported", { unsupportedModels: new Set(["m1"]) }),
+      account("auth", { authFailed: true }),
+      account("ok", { totalTokens: 999 }),
+    ];
+    expect(engine.pick(accounts, "m1")?.id).toBe("ok");
+  });
+
+  it("prefers accounts whose supportedModels include the requested upstream model", () => {
+    const engine = new RotationEngine();
+    const accounts = [
+      account("no-model", { totalTokens: 0, supportedModels: new Set(["other-model"]) }),
+      account("unknown-models", { totalTokens: 10 }),
+      account("has-model", { totalTokens: 500, supportedModels: new Set(["target-upstream"]) }),
+    ];
+    expect(engine.pick(accounts, "target", new Set(), "target-upstream")?.id).toBe("has-model");
   });
 });

@@ -18,7 +18,18 @@ export function openAIRouter(svc: Services) {
 
   router.get("/models", async (_req, res, next) => {
     try {
-      const upstream = await svc.catalog.upstream(() => svc.anyCredentials());
+      const accounts = await svc.store.listRuntimeAccounts();
+      const credsList: { accountId: string; token: string; projectId: string }[] = [];
+      for (const a of accounts) {
+        if (!a.enabled || a.banned || a.verificationRequired || a.authFailed) continue;
+        try {
+          const c = await svc.credentials(a.id);
+          credsList.push({ accountId: a.id, ...c });
+        } catch { /* skip */ }
+      }
+      const upstream = await svc.catalog.upstreamPool(credsList, (accountId, modelIds) => {
+        svc.store.setSupportedModels(accountId, modelIds);
+      });
       res.json({ object: "list", data: svc.catalog.list(upstream) });
     } catch (e) { next(e); }
   });
@@ -36,7 +47,7 @@ export function openAIRouter(svc: Services) {
     const failures: UpstreamFailure[] = [];
     try {
       for (let attempt = 0; attempt < MAX_ACCOUNT_ATTEMPTS; attempt++) {
-        const account = svc.rotation.pick(await svc.store.listRuntimeAccounts(), model.id, tried);
+        const account = svc.rotation.pick(await svc.store.listRuntimeAccounts(), model.id, tried, model.upstream);
         if (!account) break;
         tried.add(account.id);
         svc.store.recordRequest(account, model.id);
@@ -80,6 +91,11 @@ async function attemptAccount(svc: Services, account: AccountRuntime, model: Mod
 async function applyFailure(svc: Services, account: AccountRuntime, model: ModelInfo, failure: UpstreamFailure) {
   svc.store.recordFailure(account, model.id, `${failure.status} ${failure.kind}: ${failure.message}`);
   if (failure.kind === "banned") return svc.store.markBanned(account, failure.message);
+  if (failure.kind === "verification_required") return svc.store.markVerificationRequired(account, failure.message);
+  if (failure.kind === "not_found") {
+    svc.store.markModelUnsupported(account, model.id);
+    return svc.rotation.recordFailure(account, model.id, failure.message, { cooldownMs: failure.cooldownMs });
+  }
   if (failure.kind === "auth") return svc.rotation.recordFailure(account, model.id, failure.message, { authFailed: true });
   if (failure.cooldownMs) svc.rotation.recordFailure(account, model.id, failure.message, { cooldownMs: failure.cooldownMs });
 }
@@ -130,7 +146,7 @@ function sendExhausted(svc: Services, res: express.Response, model: ModelInfo, f
     return openAIError(res, 429, `All accounts are out of quota for ${model.id}: ${quota[0].message}`, { type: "quota_exceeded", code: "quota", accounts: kinds });
   }
   const last = failures.at(-1);
-  if (last && last.kind !== "banned" && last.kind !== "auth") return sendFailure(res, last);
+  if (last && last.kind !== "banned" && last.kind !== "verification_required" && last.kind !== "auth") return sendFailure(res, last);
 
   // Nothing was sent upstream, or only to accounts that turned out unusable.
   return (async () => {
@@ -141,6 +157,7 @@ function sendExhausted(svc: Services, res: express.Response, model: ModelInfo, f
       return openAIError(res, 429, `Every account is cooling down for ${model.id}; next one frees up in ${Math.ceil((next - Date.now()) / 1000)}s.`, { type: "rate_limited", code: "cooldown", accounts: kinds });
     }
     const banned = accounts.filter((a) => a.banned).length;
-    return openAIError(res, 503, `No usable Antigravity account: ${accounts.length} total, ${banned} banned by Google, ${accounts.filter((a) => !a.enabled).length} disabled, ${accounts.filter((a) => a.authFailed).length} with failed auth.`, { type: "routing_error", code: "no_account", accounts: kinds });
+    const verify = accounts.filter((a) => a.verificationRequired).length;
+    return openAIError(res, 503, `No usable Antigravity account for ${model.id}: ${accounts.length} total, ${banned} banned, ${verify} need verification, ${accounts.filter((a) => !a.enabled).length} disabled, ${accounts.filter((a) => a.authFailed).length} auth failed.`, { type: "routing_error", code: "no_account", accounts: kinds });
   })();
 }

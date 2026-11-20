@@ -84,6 +84,38 @@ describe("POST /v1/chat/completions", () => {
     expect(calls[0].url).toContain("streamGenerateContent?alt=sse");
   });
 
+  it("marks verification_required on 403 Verify your account and skips it on subsequent requests", async () => {
+    const { app, authDir } = setup(["verify", "ok"]);
+    mockUpstream((token) => token === "verify"
+      ? json(403, { error: { code: 403, message: "Verify your account to continue." } })
+      : json(200, answer("OK")));
+    for (let i = 0; i < 2; i++) {
+      const res = await request(app).post("/v1/chat/completions").set("Authorization", "Bearer key")
+        .send({ model: "gemini-3.8-flash-medium", messages: [{ role: "user", content: "hi" }] }).expect(200);
+      expect(res.body.choices[0].message.content).toBe("OK");
+    }
+    expect(JSON.parse(readFileSync(join(authDir, "verify.json"), "utf8")).verification_required.message).toContain("Verify your account");
+    const before = calls.filter((c) => c.token === "verify").length;
+    await request(app).post("/v1/chat/completions").set("Authorization", "Bearer key")
+      .send({ model: "gemini-3.8-flash-medium", messages: [{ role: "user", content: "hi" }] }).expect(200);
+    expect(calls.filter((c) => c.token === "verify").length).toBe(before);
+  });
+
+  it("marks a model unsupported on 404 for that account and routes future requests to another account", async () => {
+    const { app } = setup(["no-model", "has-model"]);
+    mockUpstream((token) => token === "no-model"
+      ? json(404, { error: { code: 404, message: "Requested entity was not found." } })
+      : json(200, answer("OK")));
+    for (let i = 0; i < 2; i++) {
+      await request(app).post("/v1/chat/completions").set("Authorization", "Bearer key")
+        .send({ model: "gemini-4-carbon-high", messages: [{ role: "user", content: "hi" }] }).expect(200);
+    }
+    const before = calls.filter((c) => c.token === "no-model").length;
+    await request(app).post("/v1/chat/completions").set("Authorization", "Bearer key")
+      .send({ model: "gemini-4-carbon-high", messages: [{ role: "user", content: "hi" }] }).expect(200);
+    expect(calls.filter((c) => c.token === "no-model").length).toBe(before);
+  });
+
   it("asks the caller to wait when every account is cooling down", async () => {
     const { app } = setup(["a"]);
     mockUpstream(() => json(429, { error: { code: 429, message: "Quota exceeded", details: [{ retryDelay: "30s" }] } }));

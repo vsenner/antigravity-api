@@ -1,9 +1,9 @@
-import { IDE_METADATA, QUOTA_BASE_URL, USER_AGENT } from "../config.js";
+import { IDE_METADATA, QUOTA_BASE_URL, QUOTA_USER_AGENT, USER_AGENT } from "../config.js";
 
 export interface PostResult { ok: boolean; status: number; json: any; message: string }
 
 /** POST to a v1internal method with the IDE's identity. */
-export async function postInternal(method: string, token: string, payload: unknown, userAgent = USER_AGENT, base = QUOTA_BASE_URL): Promise<PostResult> {
+export async function postInternal(method: string, token: string, payload: unknown, userAgent = QUOTA_USER_AGENT, base = QUOTA_BASE_URL): Promise<PostResult> {
   const res = await fetch(`${base}/v1internal:${method}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": userAgent, accept: "*/*" },
@@ -28,5 +28,6 @@ export async function loadCodeAssist(token: string): Promise<CodeAssistInfo> {
 }
 
 export async function fetchAvailableModels(token: string, projectId: string): Promise<PostResult> {
-  return postInternal("fetchAvailableModels", token, { project: projectId });
+  // Use the aidev_client UA format, not the nodejs-client one
+  return postInternal("fetchAvailableModels", token, { project: projectId }, USER_AGENT);
 }
